@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自定义时间区间涨跌幅 · 改动计划</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e8eaed; --muted:#9aa3b2; --accent:#4da3ff; --up:#e5484d; --down:#30a46c; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; line-height:1.7; padding:32px 20px; }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:26px; margin-bottom:6px; }
+  .sub { color:var(--muted); margin-bottom:28px; font-size:14px; }
+  h2 { font-size:20px; margin:34px 0 14px; padding-left:12px; border-left:4px solid var(--accent); }
+  h3 { font-size:16px; margin:22px 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; background:var(--card); border-radius:10px; overflow:hidden; }
+  th,td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--line); }
+  th { background:#1f242e; color:var(--muted); font-weight:600; white-space:nowrap; }
+  tr:last-child td { border-bottom:none; }
+  .ok { color:#3ddc84; font-weight:700; }
+  .warn { color:#f5a524; font-weight:700; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+  .b-p1 { background:rgba(77,163,255,.15); color:var(--accent); }
+  .b-p2 { background:rgba(245,165,36,.15); color:#f5a524; }
+  .b-free { background:rgba(61,220,132,.15); color:#3ddc84; }
+  .b-kline { background:rgba(229,72,77,.15); color:#e5484d; }
+  .metrics { display:flex; gap:14px; flex-wrap:wrap; margin:16px 0; }
+  .metric { flex:1; min-width:150px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .metric .v { font-size:22px; font-weight:700; color:var(--accent); }
+  .metric .k { font-size:12px; color:var(--muted); margin-top:2px; }
+  .flow { display:flex; align-items:stretch; gap:10px; flex-wrap:wrap; margin:14px 0; }
+  .step { flex:1; min-width:180px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; font-size:13px; }
+  .step b { display:block; margin-bottom:4px; color:var(--accent); }
+  code { background:#232833; padding:2px 7px; border-radius:5px; font-size:13px; color:#ffd479; }
+  .muted { color:var(--muted); font-size:13px; }
+  ul { padding-left:22px; }
+  li { margin-bottom:6px; font-size:14px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:6px; font-size:12px; background:#232833; color:var(--muted); margin-right:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>自定义时间区间涨跌幅 · 改动计划</h1>
+  <div class="sub">A股云图 v11 → v12 ｜ 2026-08-06 ｜ 板块首页 + 二级个股页联动</div>
+
+  <div class="metrics">
+    <div class="metric"><div class="v">6 档</div><div class="k">预设区间（当日/5/10/20/60日/年初至今）</div></div>
+    <div class="metric"><div class="v">0</div><div class="k">额外请求量（一期，复用 8 秒拉取通道）</div></div>
+    <div class="metric"><div class="v">2 期</div><div class="k">预设区间 → 自定义任意日期</div></div>
+    <div class="metric"><div class="v">3 文件</div><div class="k">app.js / index.html / fetch_data.py（二期）</div></div>
+  </div>
+
+  <h2>一、实测结论：东财区间字段映射（已验证）</h2>
+  <div class="card">
+  <p class="muted" style="margin-bottom:12px">对照江苏银行 600919 的 300 根日 K 线逐项验证（当日 +1.64% 为基准）：</p>
+  <table>
+    <tr><th>区间</th><th>ulist 字段</th><th>接口值</th><th>K线实测</th><th>判定</th></tr>
+    <tr><td>当日</td><td><code>f3</code></td><td>1.64</td><td>1.64</td><td class="ok">✓ 确认</td></tr>
+    <tr><td>近 5 日（一周）</td><td><code>f109</code></td><td>-0.25</td><td>-0.34</td><td class="ok">✓ 确认（复权口径微差）</td></tr>
+    <tr><td>近 10 日</td><td><code>f160</code></td><td>2.17</td><td>2.08</td><td class="ok">✓ 确认</td></tr>
+    <tr><td>近 20 日（一月）</td><td><code>f110</code></td><td>5.83</td><td>5.75</td><td class="ok">✓ 确认</td></tr>
+    <tr><td>近 60 日</td><td><code>f24</code></td><td>7.18</td><td>7.09</td><td class="ok">✓ 确认</td></tr>
+    <tr><td>年初至今</td><td><code>f25</code></td><td>19.82</td><td>18.99</td><td class="ok">✓ 确认（口径含首日/复权差）</td></tr>
+    <tr><td>近一年</td><td>无字段</td><td>—</td><td>18.39（120日）</td><td class="warn">⚠ 需走 K 线</td></tr>
+  </table>
+  <p style="margin-top:12px" class="muted">结论：<b style="color:var(--text)">6 个预设区间可在一次 ulist 请求中全部取到</b>（扩展 fields 字符串即可），与现有 8 秒实时拉取零冲突、零额外请求。近一年与任意自定义日期必须走 K 线接口（一次一只）。</p>
+  </div>
+
+  <h2>二、方案设计（两期）</h2>
+  <div class="flow">
+    <div class="step"><b>一期 · 预设区间（推荐先做）</b>header 加区间选择器，6 档切换。数据随 8 秒实时通道一起拉取，全市场即时生效。</div>
+    <div class="step"><b>二期 · 自定义日期</b>起止日期选择器。二级页按需拉 K 线（≤100 只/行业，可行）；板块首页需后端预计算脚本或代表股近似加权。</div>
+  </div>
+
+  <h3>一期改动（app.js + index.html，约 0.5 天）</h3>
+  <table>
+    <tr><th>模块</th><th>改动内容</th></tr>
+    <tr><td><code>fetchQuotesBatch</code></td><td>fields 由 <code>f12,f2,f3,f4,f6</code> 扩为 <code>f12,f2,f3,f4,f6,f109,f160,f110,f24,f25</code>，回填节点新增 <code>pct5/pct10/pct20/pct60/pctYTD</code></td></tr>
+    <tr><td>树节点</td><td>buildTree 从 data.json 也读入区间字段（后端全量抓取时一并带），实时回填与快照回填双通道</td></tr>
+    <tr><td>新增 <code>setRange()</code></td><td>当前选中区间（默认当日），决定颜色/排序/分区/详情显示用哪个涨跌幅</td></tr>
+    <tr><td><code>relayout()</code></td><td>涨跌分区、组内排序改用 <code>rangePctOf(node)</code>（按选中区间取值）；行业节点 = 成分股区间涨跌幅市值加权</td></tr>
+    <tr><td><code>drawLabel / hover</code></td><td>格子与悬停详情显示"区间名 + 区间涨跌幅"，颜色随区间</td></tr>
+    <tr><td><code>index.html</code></td><td>header 加区间选择器（下拉或按钮组：当日/5日/10日/20日/60日/年初至今）；样式沿用暗色主题；bump v12</td></tr>
+  </table>
+
+  <h3>二期改动（自定义日期）</h3>
+  <table>
+    <tr><th>范围</th><th>方案</th><th>成本</th></tr>
+    <tr><td>二级个股页</td><td>切换区间时并发拉取该行业全部股票日 K（lmt=区间交易日数+1），缓存"区间基价"，之后每 8 秒用最新价增量重算区间涨跌幅</td><td>一次性 ≤100 请求/行业，之后零成本</td></tr>
+    <tr><td>板块首页</td><td>方案 A：后端新增 <code>fetch_range.py</code> 每日收盘后低频预计算（5545 只 K 线，约 30-45 分钟），区间基价入库；盘中前端增量计算。方案 B：每行业取市值 Top N 代表股近似加权（提示误差）。</td><td>A：约 5.5K 请求/天（风控需低频）；B：切换时一次性约 1.3K 请求</td></tr>
+  </table>
+
+  <h2>三、风险与边界</h2>
+  <div class="card">
+  <ul>
+    <li><b>复权口径</b>：ulist 区间字段与 K 线手算存在 0.05~0.8pp 差异（除权/复权方式不同），属正常误差，不影响排序与可视化判断</li>
+    <li><b>新股/次新股</b>：上市不足区间的股票，字段返回 <code>-</code> 或较小样本，统一按"无数据显示灰色 + 排末尾"处理</li>
+    <li><b>自定义日期（二期首页）</b>：全市场 K 线拉取请求量大，默认不自动触发，需用户显式点击 + 进度提示</li>
+    <li><b>近一年</b>：无现成字段，归入二期（K 线方案）</li>
+    <li><b>风控</b>：一期零新增请求，无风险；二期按需拉取需控制并发与频率（沿用现有退避/降级机制）</li>
+  </ul>
+  </div>
+
+  <h2>四、实施顺序建议</h2>
+  <table>
+    <tr><th>步骤</th><th>内容</th><th>验证方式</th></tr>
+    <tr><td>1</td><td>后端 <code>fetch_data.py</code> fields 扩展 + data.json 增加区间字段（全量与增量都带）</td><td>跑一轮全量，检查 data.json 字段</td></tr>
+    <tr><td>2</td><td>前端拉取通道扩展 + 节点回填</td><td>控制台打印 600919 的 6 个区间值</td></tr>
+    <tr><td>3</td><td>区间选择器 UI + 渲染/排序/分区/详情联动</td><td>浏览器切换 6 档，对比颜色与排序变化</td></tr>
+    <tr><td>4</td><td>（二期）自定义日期：二级页 K 线按需计算</td><td>选任意区间，抽查个股涨跌与东财网页核对</td></tr>
+    <tr><td>5</td><td>（二期）板块首页自定义：fetch_range.py 或代表股近似</td><td>对照东财行业板块区间涨跌</td></tr>
+  </table>
+
+  <div class="card" style="margin-top:26px">
+    <b>建议</b>：先做一期（预设 6 档，覆盖 95% 使用场景且零成本零风险），浏览器实测通过后再评估二期自定义日期的投入产出。一期完成后，52etf.site 的区间功能将全部对齐，且多出 10 日/60 日两档。
+  </div>
+</div>
+</body>
+</html>

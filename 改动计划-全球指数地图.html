@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>改动计划 - 全球指数地图（集成进 A 股云图 v20）</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; background: #f5f6fa; color: #222; line-height: 1.7; }
+  h1 { font-size: 24px; border-bottom: 3px solid #c0392b; padding-bottom: 8px; }
+  h2 { font-size: 19px; color: #c0392b; margin-top: 28px; border-left: 4px solid #c0392b; padding-left: 10px; }
+  h3 { font-size: 15px; margin-top: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; background: #fff; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  th { background: #ecf0f1; }
+  code { background: #eee; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  .ok { color: #27ae60; font-weight: 700; }
+  .warn { color: #e67e22; font-weight: 700; }
+  .no { color: #95a5a6; }
+  .box { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin: 10px 0; }
+  .tag { display: inline-block; background: #c0392b; color: #fff; font-size: 12px; border-radius: 10px; padding: 1px 10px; margin-right: 6px; }
+</style>
+</head>
+<body>
+<h1>改动计划：全球指数地图（集成进 A 股云图）</h1>
+<p>目标版本：<b>v20</b> ｜ 日期：2026-08-06 ｜ 状态：探路已完成，待用户确认后实施</p>
+
+<h2>0. 需求（用户确认版）</h2>
+<div class="box">
+<ul>
+<li>将「全球指数地图」以 <b>Tab 切换</b> 形式集成进现有 index.html（header 加「A股云图｜全球指数」）</li>
+<li>ECharts 世界地图：国家按涨跌幅<b>热力着色</b>（红涨绿跌，复用 pctColor 逻辑）；无数据国家灰色</li>
+<li>hover 国家 → 浮层显示该国指数摘要；点击国家 → 右侧面板列出该国全部指数（名称/现价/涨跌/涨跌幅/时间）</li>
+<li>复用区间选择器（6 档），地图涨跌幅口径随区间联动（尽力而为，见风险 R1）</li>
+<li>8 秒实时刷新（浏览器直连东财 push2delay，全球指数 secids 单独一批）</li>
+<li>与 A 股云图共享 header / 主题 / 数据模式（fetch_data.py 抓 global.json）</li>
+<li class="no"><s>指数添加自选</s> —— <b>已删除</b>（用户确认不做，自选功能保持仅 A 股个股）</li>
+</ul>
+</div>
+
+<h2>1. 数据源探路结果（已完成实测）</h2>
+<h3>1.1 东财 push2delay ulist 通道可用 ✅</h3>
+<p>接口：<code>https://push2delay.eastmoney.com/api/qt/ulist.np/get?fltt=2&amp;secids=100.XXX,&amp;fields=f2,f3,f4,f12,f14,f109,f160,f110,f24,f25,f124</code><br>
+与 A 股同一通道、同一字段体系（f2 现价 / f3 涨跌幅 / f109 5日 / f160 10日 / f110 20日 / f24 60日 / f25 年初至今 / f124 时间戳）。</p>
+
+<h3>1.2 已实测可用的全球指数（28 个，覆盖 24 国家/地区）</h3>
+<table>
+<tr><th>secid</th><th>名称</th><th>国家/地区</th><th>地图区域</th><th>备注</th></tr>
+<tr><td>100.NDX</td><td>纳斯达克</td><td>美国</td><td>United States</td><td class="ok">✓</td></tr>
+<tr><td>100.DJIA</td><td>道琼斯</td><td>美国</td><td>United States</td><td class="ok">✓</td></tr>
+<tr><td>100.SPX</td><td>标普500</td><td>美国</td><td>United States</td><td class="ok">✓</td></tr>
+<tr><td>100.HSI</td><td>恒生指数</td><td>中国香港</td><td>China</td><td class="ok">✓ 区间字段真实</td></tr>
+<tr><td>100.HSCEI</td><td>国企指数</td><td>中国香港</td><td>China</td><td class="ok">✓ 区间字段真实</td></tr>
+<tr><td>100.N225</td><td>日经225</td><td>日本</td><td>Japan</td><td class="ok">✓</td></tr>
+<tr><td>100.TWII</td><td>台湾加权</td><td>中国台湾</td><td>China</td><td class="ok">✓</td></tr>
+<tr><td>100.KS11</td><td>韩国KOSPI</td><td>韩国</td><td>Korea</td><td class="ok">✓</td></tr>
+<tr><td>100.FTSE</td><td>英国富时100</td><td>英国</td><td>United Kingdom</td><td class="ok">✓</td></tr>
+<tr><td>100.GDAXI</td><td>德国DAX30</td><td>德国</td><td>Germany</td><td class="ok">✓</td></tr>
+<tr><td>100.FCHI</td><td>法国CAC40</td><td>法国</td><td>France</td><td class="ok">✓</td></tr>
+<tr><td>100.MIB</td><td>意大利MIB</td><td>意大利</td><td>Italy</td><td class="ok">✓</td></tr>
+<tr><td>100.IBEX</td><td>西班牙IBEX35</td><td>西班牙</td><td>Spain</td><td class="ok">✓</td></tr>
+<tr><td>100.ATX</td><td>奥地利ATX</td><td>奥地利</td><td>Austria</td><td class="ok">✓</td></tr>
+<tr><td>100.SSMI</td><td>瑞士SMI</td><td>瑞士</td><td>Switzerland</td><td class="ok">✓</td></tr>
+<tr><td>100.STI</td><td>新加坡海峡时报</td><td>新加坡</td><td>Singapore</td><td class="ok">✓ 区间字段真实</td></tr>
+<tr><td>100.SENSEX</td><td>印度孟买SENSEX</td><td>印度</td><td>India</td><td class="ok">✓</td></tr>
+<tr><td>100.AS51</td><td>澳大利亚标普200</td><td>澳大利亚</td><td>Australia</td><td class="ok">✓</td></tr>
+<tr><td>100.TSX</td><td>加拿大S&amp;P/TSX</td><td>加拿大</td><td>Canada</td><td class="ok">✓</td></tr>
+<tr><td>100.BVSP</td><td>巴西BOVESPA</td><td>巴西</td><td>Brazil</td><td class="ok">✓</td></tr>
+<tr><td>100.MXX</td><td>墨西哥BOLSA</td><td>墨西哥</td><td>Mexico</td><td class="ok">✓</td></tr>
+<tr><td>100.RTS</td><td>俄罗斯RTS</td><td>俄罗斯</td><td>Russia</td><td class="ok">✓</td></tr>
+<tr><td>100.NZ50</td><td>新西兰50</td><td>新西兰</td><td>New Zealand</td><td class="ok">✓</td></tr>
+<tr><td>100.VNINDEX</td><td>越南胡志明</td><td>越南</td><td>Vietnam</td><td class="ok">✓</td></tr>
+<tr><td>100.KLSE</td><td>马来西亚KLCI</td><td>马来西亚</td><td>Malaysia</td><td class="ok">✓</td></tr>
+<tr><td>100.JKSE</td><td>印尼雅加达综合</td><td>印度尼西亚</td><td>Indonesia</td><td class="ok">✓</td></tr>
+<tr><td>100.PSI</td><td>菲律宾马尼拉</td><td>菲律宾</td><td>Philippines</td><td class="ok">✓</td></tr>
+<tr><td>100.SET</td><td>泰国SET</td><td>泰国</td><td>Thailand</td><td class="ok">✓</td></tr>
+</table>
+<p class="warn">未命中（二期可补）：沙特(100.TASI)、土耳其(100.XU100)、南非(100.JTOPI)、阿联酋(100.ADI) —— 一期不阻塞，世界地图主要经济体已覆盖。</p>
+
+<h2>2. UI 设计</h2>
+<h3>2.1 Tab 切换</h3>
+<div class="box">header 右侧（区间选择器旁）新增两个 Tab：<b>「A股云图」</b>（默认）/ <b>「全球指数」</b>。切换时 Canvas 视图与地图视图互斥显示，热力图下钻状态保留。</div>
+<h3>2.2 地图视图</h3>
+<div class="box">
+<ul>
+<li>容器 <code>#globalView</code>（全屏区域，替代 #wrap 显示），ECharts 世界地图，深色主题对齐现有风格</li>
+<li>国家着色：取该国全部指数<b>市值/等权平均涨跌幅</b>（简单等权即可），映射 pctColor；无数据国家灰色 <code>#1e2530</code></li>
+<li>hover 国家：tooltip 显示该国指数摘要（最多列 4-5 条 + "共 N 条"）</li>
+<li>点击国家：右侧滑出 <code>#countryPanel</code>（复用自选面板视觉）：该国指数列表（名称/现价/涨跌幅/涨跌/行情时间），点 × 或点地图空白关闭；列表条目点击无跳转（一期无外链）</li>
+<li>右下角图例：涨/跌色阶</li>
+</ul>
+</div>
+
+<h2>3. 数据链路</h2>
+<div class="box">
+<ol>
+<li><b>结构数据</b>：fetch_data.py 增加 <code>fetch_global()</code> → 用上表 28 个 secid 拉 ulist（带区间字段）→ 写 <code>global.json</code>（含 name/code/price/pct/区间字段/time/国家映射）；启动/每交易日一次，失败不影响 A 股主流程</li>
+<li><b>实时数据</b>：app.js 的 refreshQuotes 循环在「全球指数」视图激活时，额外发一批 ulist 请求（同 QUOTE_URL，secids=28 个 100. 前缀，远低于 500 上限）→ 更新地图着色与面板数值；8 秒节奏与 A 股一致</li>
+<li><b>GeoJSON</b>：世界地图数据本地化（从 ifnews <code>worldData.js</code> 提取或 echarts 官方 world.json），存 <code>map/world.json</code>；<code>echarts.min.js</code> 本地化（约 1MB，一次下载）</li>
+</ol>
+</div>
+
+<h2>4. 改动清单</h2>
+<table>
+<tr><th>文件</th><th>改动</th></tr>
+<tr><td>index.html</td><td>引入 echarts.min.js + world.json；header 加 Tab 按钮；加 #globalView 容器 + #countryPanel；bump v20</td></tr>
+<tr><td>app.js</td><td>视图切换（tabClick/switchView）；ECharts 初始化+resize；地图热力着色（国家等权均值→pctColor）；hover/点击事件；refreshQuotes 扩展全球批次；setRange 联动地图；f124 时间戳转本地时间显示</td></tr>
+<tr><td>fetch_data.py</td><td>fetch_global() + GLOBAL_SECIDS 表 + global.json 原子写；复用现有 DOMAINS/重试逻辑</td></tr>
+<tr><td>新增</td><td>map/world.json（GeoJSON）、lib/echarts.min.js（本地化）</td></tr>
+<tr><td>README.md</td><td>新增「全球指数地图（v20）」章节</td></tr>
+</table>
+
+<h2>5. 实施顺序</h2>
+<ol>
+<li>下载 echarts.min.js + world GeoJSON 到本地，验证本地引用可渲染世界地图（独立最小测试页）</li>
+<li>fetch_data.py 加 fetch_global() → 生成 global.json，校验字段</li>
+<li>index.html 加 Tab + 容器；app.js 视图切换 + 地图初始化 + 着色 + 国家浮层/面板</li>
+<li>8 秒实时批次 + 区间联动 + 时间格式化</li>
+<li>autoglm 全流程验证（切 Tab→地图渲染→hover 中国→点击美国面板→8 秒数值更新→区间切换→回 A股云图状态保留）</li>
+<li>bump v20 + README 更新</li>
+</ol>
+
+<h2>6. 风险与对策</h2>
+<table>
+<tr><th>#</th><th>风险</th><th>对策</th></tr>
+<tr><td>R1</td><td class="warn">部分指数区间字段=当日值（实测：美股 3 只在非交易时段 f109/f160/f110/f24/f25 全等于 f3；恒生/新加坡/印度等为真实区间值）</td><td>区间≠当日时正常显示；等于当日或缺失时显示「—」并 tooltip 注明「该市场区间数据不可用」</td></tr>
+<tr><td>R2</td><td>display:none 容器初始化 ECharts 尺寸为 0</td><td>首次切换到地图 Tab 时再 init（懒初始化），切回时 resize()</td></tr>
+<tr><td>R3</td><td>GeoJSON 区域名与国家映射不一致</td><td>映射表用标准英文名（已在上表核对）；上线前遍历校验缺失国家</td></tr>
+<tr><td>R4</td><td>f124 为 Unix 秒时间戳</td><td>格式化显示本地时间；无数据/停牌显示「—」</td></tr>
+<tr><td>R5</td><td>东财全球指数接口风控</td><td>8 秒批次仅 28 个 secid（远低于阈值）；与 A 股共用请求节流</td></tr>
+</table>
+
+<h2>7. 工作量估算</h2>
+<div class="box">
+探路（已完成）：0.5 天 ｜ 一期实施：<b>1.5-2 天</b> ｜ 验证 + 收尾：0.5 天<br>
+二期（可选）：补沙特/土耳其/南非等指数、地图搜索定位、全球指数 K 线详情
+</div>
+
+<p style="color:#888; margin-top:32px;">—— 计划文档 v1.0（2026-08-06）· 待确认后实施 ——</p>
+</body>
+</html>

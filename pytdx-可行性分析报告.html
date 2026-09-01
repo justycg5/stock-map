@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据源切换 pytdx 可行性分析</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --border: #e2e6ec; --text: #1c2330;
+    --muted: #6b7484; --accent: #2563eb; --red: #dc2626; --green: #059669;
+    --amber: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; line-height: 1.65; padding: 32px 20px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0 28px; }
+  .metric { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .metric .v { font-size: 22px; font-weight: 700; }
+  .metric .k { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .metric .v.red { color: var(--red); } .metric .v.green { color: var(--green); } .metric .v.amber { color: var(--amber); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+  .card h2 { font-size: 16px; margin-bottom: 10px; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 10px; margin-right: 6px; }
+  .badge.red { background: #fee2e2; color: var(--red); } .badge.green { background: #d1fae5; color: var(--green); }
+  .badge.amber { background: #fef3c7; color: var(--amber); } .badge.gray { background: #e5e7eb; color: #4b5563; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f0f2f6; font-weight: 600; white-space: nowrap; }
+  .ok { color: var(--green); font-weight: 600; } .no { color: var(--red); font-weight: 600; } .warn { color: var(--amber); font-weight: 600; }
+  ul { padding-left: 20px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  code { background: #eef1f6; border-radius: 4px; padding: 1px 6px; font-size: 12.5px; }
+  .conclusion { border-left: 4px solid var(--accent); padding: 14px 16px; background: #eff6ff; border-radius: 0 10px 10px 0; margin: 18px 0; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>数据源切换 pytdx 可行性分析</h1>
+  <div class="sub">A股云图本地版 · 2026-08-05 · 基于本机实测数据（104 台服务器扫描 + 频率限制压测）</div>
+
+  <div class="metrics">
+    <div class="metric"><div class="v green">19 / 104</div><div class="k">可连接且支持行情命令的服务器</div></div>
+    <div class="metric"><div class="v">80 只/次</div><div class="k">单次批量行情请求上限</div></div>
+    <div class="metric"><div class="v amber">~60 次/轮</div><div class="k">单服务器累计请求额度（超限被踢）</div></div>
+    <div class="metric"><div class="v red">0 台</div><div class="k">支持股票列表接口的服务器</div></div>
+  </div>
+
+  <div class="conclusion">
+    <strong>核心结论：纯 pytdx 替换不可行；混合方案（东财低频 + pytdx 高频）技术可行但工程成本高、收益有限，不建议当前切换。</strong>
+    维持东财方案，配合本次已优化的抓取脚本（多域名轮换 + 动态翻页 + 重试）即可满足热力图需求。
+  </div>
+
+  <div class="card">
+    <h2>1. 为什么考虑 pytdx</h2>
+    <p>pytdx 是通达信行情协议的 Python 实现，直连券商/行情服务器，理论上有三个优势：</p>
+    <ul>
+      <li><b>更实时</b>：协议级行情，比东财网页接口的延迟行情更接近 Level-1 实时</li>
+      <li><b>无网页风控</b>：不依赖 HTTP 网页接口，绕开反爬断连问题</li>
+      <li><b>免费无 token</b>：无需任何 API Key</li>
+    </ul>
+    <p>本机实测（扫描 pytdx 内置 104 台服务器 + 真实行情压测），逐一验证上述假设。</p>
+  </div>
+
+  <div class="card">
+    <h2>2. 实测结果：字段覆盖</h2>
+    <table>
+      <tr><th>热力图所需字段</th><th>pytdx 可得性</th><th>获取方式与代价</th></tr>
+      <tr><td>股票代码 / 名称</td><td class="warn">部分</td><td>列表接口 <code>get_security_list</code> 在 104 台服务器中 <b>0 台可用</b>；需从其他源（东财）导入代码表</td></tr>
+      <tr><td>现价 / 涨跌幅 / 成交额</td><td class="ok">可得</td><td><code>get_security_quotes</code> 批量行情，上限 <b>80 只/次</b>，涨跌幅需用 (现价-昨收)/昨收 自算</td></tr>
+      <tr><td>总市值（方块权重）</td><td class="warn">间接</td><td>无直接字段；<code>get_finance_info</code> 返回总股本，×现价可得，但<b>需逐股请求</b>（实测 20 只 0.95s，全市场 5400 只约 255s）</td></tr>
+      <tr><td>行业分类</td><td class="warn">间接</td><td>无行业板块文件（仅概念/风格/指数板块）；<code>get_finance_info</code> 有 industry 字段但同样逐股获取，且为通达信粗分类（约 60+ 类）</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>3. 实测结果：稳定性与性能</h2>
+    <table>
+      <tr><th>项目</th><th>实测数据</th><th>对热力图的影响</th></tr>
+      <tr><td>服务器可用率</td><td>104 台中 19 台可用（18%），多数超时/拒绝</td><td class="warn">可用池有限，需健康巡检 + 故障转移</td></tr>
+      <tr><td>批量上限</td><td>80 只/次（超过即丢包）</td><td>全市场 5545 只需 <b>70 次请求</b></td></tr>
+      <tr><td>频率限制</td><td>约 60 次请求/轮后被踢（间隔 0.5s 测试），冷却 15s 恢复</td><td class="no">单服务器拉不完一轮全市场；8 秒级高频刷新不现实</td></tr>
+      <tr><td>一轮全市场耗时</td><td>70 次请求 × 0.5s 间隔 ≈ 35s+，且中途超限需重连</td><td class="warn">实际一轮快照约 1-3 分钟（含重连冷却）</td></tr>
+      <tr><td>财务字段速度</td><td>5400 只 get_finance_info 约 255s</td><td>只适合低频（日级/周级）缓存</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>4. 三方案对比</h2>
+    <table>
+      <tr><th>维度</th><th>维持东财（现状）</th><th>纯 pytdx</th><th>混合：东财低频 + pytdx 高频</th></tr>
+      <tr><td>字段完整度</td><td class="ok">齐全（代码/价格/市值/行业）</td><td class="no">缺市值、行业、代码表</td><td class="ok">东财补全静态字段</td></tr>
+      <tr><td>刷新频率</td><td class="warn">约 8 秒级延迟行情</td><td class="warn">一轮 1-3 分钟</td><td class="ok">东财 5 分钟 + pytdx 30-60s 价格层</td></tr>
+      <tr><td>稳定性</td><td class="warn">偶发限流（已用多域名+重试缓解）</td><td class="no">服务器池小、限额严</td><td class="warn">需多服务器并行 + 冷却管理</td></tr>
+      <tr><td>工程成本</td><td class="ok">已完成（fetch_data.py）</td><td class="no">还需自建代码表/市值/行业管线</td><td class="warn">约 +150~250 行，含服务器池管理</td></tr>
+      <tr><td>实时性收益</td><td>—</td><td class="ok">协议级 Level-1</td><td class="ok">接近实时价格</td></tr>
+      <tr><td>适合本场景？</td><td class="ok">是</td><td class="no">否</td><td class="warn">收益不匹配成本</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>5. 建议</h2>
+    <ul>
+      <li><b>维持东财数据源</b>：本次实测 5545 只全量抓取成功（约 7 分钟，含大量重试），增量刷新会快得多；把刷新频率设为 3-5 分钟一次即可稳定运行。</li>
+      <li><b>pytdx 定位为可选增强层</b>：若将来确实需要"接近实时的价格跳动"，可做混合方案——东财每 5 分钟更新代码表/市值/行业，pytdx 用 3-5 台服务器并行、每台 25 次请求分摊 70 次总量，实现 20-30s 一轮价格刷新。需要的话我可以实现。</li>
+      <li><b>不做的原因</b>：热力图的核心价值是"全市场结构一眼看"，8 秒延迟行情已足够；为省 5 秒延迟引入服务器池运维（健康检查、冷却、故障转移），投入产出比低。</li>
+    </ul>
+  </div>
+
+  <div class="footer">报告基于 2026-08-05 本机实测 · 数据源：东方财富公开接口 / pytdx 1.72 通达信协议</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>停盘时段数据陈旧问题分析</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e8eaf0; --muted:#8a94a6; --accent:#f5c542; --red:#ff5c5c; --green:#3dd68c; --blue:#8fb6e8; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Microsoft YaHei","PingFang SC",system-ui,sans-serif; line-height: 1.7; padding: 32px 16px; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .verdict { background: linear-gradient(135deg, #ff5c5c22, #f5c54222); border: 1px solid #f5c54255; border-radius: 10px; padding: 14px 18px; font-size: 15px; margin-bottom: 24px; }
+  .verdict b { color: var(--accent); }
+  .step { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .step:last-child { border-bottom: none; }
+  .marker { flex: 0 0 30px; height: 30px; border-radius: 50%; background: #232a3a; border: 1px solid var(--blue); color: var(--blue); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+  .step-title { font-weight: 600; margin-bottom: 4px; }
+  .step-text { color: #c3c9d6; font-size: 14px; }
+  code { background: #232a3a; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; color: var(--blue); }
+  h2 { font-size: 16px; margin: 26px 0 12px; color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin-bottom: 8px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+  th { background: #1b1f28; color: var(--muted); font-weight: 600; }
+  td b { color: var(--text); }
+  .note { background: #171a21; border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; font-size: 14px; margin-bottom: 10px; }
+  .fix { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .fix:last-child { border-bottom: none; }
+  .fix-num { flex: 0 0 24px; height: 24px; border-radius: 6px; background: #232a3a; border: 1px solid var(--green); color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+  .fix-title { font-weight: 600; font-size: 14px; }
+  .fix-text { color: #c3c9d6; font-size: 13.5px; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 28px; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>停盘时段数据陈旧问题分析</h1>
+  <div class="sub">A股热力图 · 2026-08-13 · 现象：中午停盘当天首次打开网页，显示昨天收盘价</div>
+
+  <div class="verdict">结论：<b>该现象确实会发生</b>，由三个逻辑缺口叠加导致——服务端只有 15:05 一个自动抓取点、前端首次打开不检测数据新鲜度、停盘时段实时模式不启动。</div>
+
+  <h2>触发链路</h2>
+  <div class="step"><div class="marker">1</div><div class="step-body"><div class="step-title">服务端只在 15:05 自动重抓</div><div class="step-text">唯一自动定时为 <code>REFETCH_AT = (15, 5)</code>（每交易日收盘后一次，跳过周末）。当天 15:05 前 data.json 保持昨天 15:05 的缓存，除非手动点"全量更新"（/api/refetch）。</div></div></div>
+  <div class="step"><div class="marker">2</div><div class="step-body"><div class="step-title">前端首次打开只拉 data.json</div><div class="step-text">页面加载 <code>fetchData()</code> 直接读 data.json 渲染云图，无"数据日期是否今天/是否过期"检测，也不会自动触发重抓。</div></div></div>
+  <div class="step"><div class="marker">3</div><div class="step-body"><div class="step-title">实时兜底只在交易时段生效</div><div class="step-text">live 模式由 <code>tickLive</code> 每 30 秒检查 <code>isTradingTime()</code>：9:30-11:30 或 13:00-15:00 才为 true。<b>11:30-13:00 停盘返回 false</b>，live 不启动。</div></div></div>
+  <div class="step"><div class="marker">4</div><div class="step-body"><div class="step-title">结果：停盘首次打开 = 昨天收盘价</div><div class="step-text">data.json 为昨日数据 → 停盘无 live 兜底 → 自动刷新（1 分钟）重拉的仍是同一旧文件 → 持续显示昨天收盘价，直到 13:00 开盘启动 live 或 15:05 自动重抓。</div></div></div>
+
+  <h2>触发条件</h2>
+  <table>
+    <tr><th>条件</th><th>说明</th></tr>
+    <tr><td>当天 15:05 之前打开</td><td>早于收盘后自动抓取时刻</td></tr>
+    <tr><td>当天没人点过"全量更新"</td><td>data.json 仍是昨天的缓存</td></tr>
+    <tr><td>停盘时段 / 未到开盘</td><td>live 实时模式不启动</td></tr>
+    <tr><td>首次打开或刷新页面</td><td>内存中无上午实时价残留</td></tr>
+  </table>
+
+  <h2>佐证</h2>
+  <div class="note">检查服务端当前 data.json：<code>fetched_at = 2026-08-13 12:12:04</code>（今天中午有一次抓取，应为手动触发）。<b>若无这次手动抓取，此时打开页面显示的就是昨天收盘价。</b></div>
+
+  <h2>相关细节</h2>
+  <div class="note">· <code>isTradingTime</code> 边界：11:30、13:00 整点算交易时段，11:30:01~12:59:59 为停盘<br>· 周末全天不启动 live，显示上周五 15:05 数据（合理行为，非 bug）<br>· autoRefresh 默认勾选，但停盘时段 tickLive 直接 return，不影响该场景<br>· 页面 header 有"数据日期（抓取时间）"可看出数据陈旧，但易被忽略</div>
+
+  <h2>修复方向（未实施）</h2>
+  <div class="fix"><div class="fix-num">1</div><div class="fix-body"><div class="fix-title">前端首次加载检测新鲜度（最小改动）</div><div class="fix-text">打开页面时读 fetched_at：交易日且未过 15:05 且日期不是今天 → 自动触发一次 /api/refetch（现有 600 秒冷却防抖，不会刷爆东财）。</div></div></div>
+  <div class="fix"><div class="fix-num">2</div><div class="fix-body"><div class="fix-title">服务端加开盘前自动抓</div><div class="fix-text">每交易日 9:15 自动重抓一次，开盘即有当日数据。</div></div></div>
+  <div class="fix"><div class="fix-num">3</div><div class="fix-body"><div class="fix-title">两者结合</div><div class="fix-text">最稳；若只改一处，方案 1 覆盖场景更全。</div></div></div>
+
+  <div class="footer">分析基于 server.py（REFETCH_AT / daily_refetch_loop / _refetch_if_needed）与 app.js（isTradingTime / tickLive / fetchData / refreshQuotes）代码核查，未做任何修改。</div>
+</div>
+</body>
+</html>

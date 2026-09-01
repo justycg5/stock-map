@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>评估报告 · 股价告警系统（企业微信群推送）</title>
+<style>
+  :root { --bg:#0e1420; --card:#16202f; --border:#2c3d5c; --fg:#dbe4f0; --muted:#7d8ba1; --gold:#ffd94a; --green:#3ddc84; --red:#ff6b6b; --blue:#5b8def; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.7 "Microsoft YaHei", sans-serif; padding: 32px 20px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 6px; color: #fff; }
+  .sub { color: var(--muted); margin-bottom: 26px; font-size: 13px; }
+  h2 { font-size: 17px; color: var(--gold); margin: 30px 0 12px; padding-left: 10px; border-left: 3px solid var(--gold); }
+  h3 { font-size: 15px; color: #fff; margin: 18px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 12px 0; }
+  .gitem { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .gitem b { display: block; color: #fff; margin-bottom: 6px; font-size: 14px; }
+  .gitem span { color: var(--muted); font-size: 12.5px; }
+  .verdict { background: linear-gradient(135deg, #1c3a2a, #16202f); border: 1px solid #2f6b4a; border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+  .verdict b { color: var(--green); font-size: 16px; }
+  code { background: #0a0f18; border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: 12.5px; color: #9ecbff; }
+  pre { background: #0a0f18; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.6; margin: 8px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+  th { background: #1a2536; color: #fff; white-space: nowrap; }
+  tr:nth-child(even) td { background: #141d2c; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11.5px; margin-right: 4px; }
+  .tag.ok { background: #16382a; color: var(--green); border: 1px solid #2f6b4a; }
+  .tag.warn { background: #3a2f16; color: var(--gold); border: 1px solid #6b5a2f; }
+  .tag.risk { background: #381616; color: var(--red); border: 1px solid #6b2f2f; }
+  .flow { font-family: Consolas, monospace; font-size: 12.5px; background: #0a0f18; border: 1px solid var(--border); border-radius: 8px; padding: 14px; white-space: pre; overflow-x: auto; color: #9ecbff; }
+  ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .note { color: var(--muted); font-size: 12.5px; }
+  .footer { margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<h1>评估报告 · 股价告警系统</h1>
+<div class="sub">项目：a-share-heatmap ｜ 日期：2026-08-10 ｜ 状态：<span class="tag ok">可行性高，建议实施</span><span class="tag warn">需提供企业微信 webhook key</span></div>
+
+<h2>一、需求理解</h2>
+<div class="card">
+  <ul>
+    <li><b>告警条件</b>：指定股票，设置<b>价格阈值</b>（如 ≥1700）或<b>涨跌幅阈值</b>（如当日 ≥5%、区间 ≥8%）</li>
+    <li><b>触发推送</b>：条件满足时，把告警信息发送到<b>企业微信群</b>（手机微信即时收到）</li>
+    <li><b>与现有系统关系</b>：数据沿用东财无鉴权接口（符合数据源纪律）；告警引擎放本地 server.py，浏览器关闭也不影响触发</li>
+  </ul>
+</div>
+
+<h2>二、现状盘点（可复用资产）</h2>
+<div class="grid">
+  <div class="gitem"><b>数据通道</b><span>东财 push2 ulist 无鉴权接口，交易时段每 8 秒刷新，前端已验证可用</span></div>
+  <div class="gitem"><b>后端扩展点</b><span>server.py 已有 /api/notes 读写 JSON 先例（do_GET/do_POST + 原子写），告警规则文件可完全复用此模式</span></div>
+  <div class="gitem"><b>前端 UI 模式</b><span>自选面板（wlPanel）结构可参照做告警管理面板；controls 区可加入口按钮</span></div>
+  <div class="gitem"><b>行情节点数据</b><span>st.price / st.pct / st.pct5 / st.pct10 / st.pct20 / st.pct60 / st.pctYTD 均已就位</span></div>
+</div>
+
+<h2>三、可行性结论</h2>
+<div class="verdict">
+  <b>结论：完全可行，推荐实施。</b><br><br>
+  企业微信群机器人（webhook）是免费、无需企业应用审批、配置成本最低的推送通道——在群里添加一个自定义机器人即可拿到 webhook 地址，用 HTTP POST 发一条 JSON 就能推到群（手机微信同步提醒）。叠加本地 server.py 常驻运行的优势，告警引擎放在后端，浏览器关不关都不影响触发。<br><br>
+  <span class="note">主要成本：server.py 增加告警引擎（轮询 + 规则状态机 + webhook 发送，约 120~150 行）+ 前端管理面板（约 120 行）。一次实施，两期拆做亦可。</span>
+</div>
+
+<h2>四、方案设计</h2>
+
+<h3>4.1 架构</h3>
+<div class="flow">┌──────────────┐   GET/POST    ┌─────────────────────────────┐
+│ 前端告警面板  │ ────────────► │ server.py  /api/alerts       │
+│ (app.js)     │               │  ├ 规则 CRUD → alerts.json    │
+└──────────────┘               │  └ webhook 配置 → webhook.json│
+                               └──────────────┬──────────────┘
+                                              │ 后台轮询线程（8s）
+                                              ▼
+                               ┌─────────────────────────────┐
+                               │ 东财 push2 ulist（无鉴权）    │
+                               │  → 规则状态机（去重/回滞）     │
+                               └──────────────┬──────────────┘
+                                              │ 条件满足
+                                              ▼
+                               ┌─────────────────────────────┐
+                               │ 企业微信群机器人 webhook      │
+                               │ POST qyapi.weixin.qq.com     │
+                               └─────────────────────────────┘</div>
+
+<h3>4.2 告警规则格式（alerts.json，前端可视化编辑）</h3>
+<pre>{
+  "600519": [
+    {
+      "id": "a1",
+      "type": "price",      // price 现价 | pct 当日涨跌幅 | pct5 | pct10 | pct20 | pct60 | pctYTD
+      "op": "&gt;=",          // &gt;= 或 &lt;=
+      "value": 1700,        // 阈值
+      "note": "茅台站上1700提醒",
+      "enabled": true,      // 启停开关
+      "state": "idle",      // idle 待触发 | fired 已触发(等待回落复位)
+      "firedAt": null,      // 最近触发时间
+      "resetPct": 0.5       // 回落 0.5% 后复位（防抖动）
+    }
+  ]
+}</pre>
+
+<h3>4.3 触发与防重复（关键设计）</h3>
+<ul>
+  <li><b>回滞复位（推荐）</b>：如「价格 ≥1700」触发后进入 fired 状态，需价格回落到 <code>1700 × (1 − 0.5%)</code> 才复位可再次触发——避免价格在阈值附近反复横跳造成刷屏</li>
+  <li><b>冷却兜底</b>：同一规则触发后 5 分钟内不重复推送（即使复位异常）</li>
+  <li><b>手动重置</b>：面板上可一键「重置已触发」；一次性提醒类规则可勾选「触发后自动停用」</li>
+  <li><b>非交易时段</b>：价格不跳动则不触发；开盘瞬间的跳空按新价格正常判定</li>
+</ul>
+
+<h3>4.4 推送内容模板（text 类型）</h3>
+<pre>【股价告警】贵州茅台(600519)
+现价：1702.00　+1.85%
+触发条件：现价 ≥ 1700.00
+备注：茅台站上1700提醒
+时间：2026-08-10 14:32:05</pre>
+<span class="note">可选 markdown 类型（彩色高亮）；支持 @所有人（每 20 分钟限一次，默认关闭）。企业微信群机器人限制：20 条/分钟、单条 ≤2048 字符，本场景远达不到上限。</span>
+
+<h2>五、交互流程</h2>
+<div class="card">
+  <ol>
+    <li><b>一次性配置</b>：用户在企业微信群 → 设置 → 群机器人 → 添加自定义机器人 → 复制 webhook 地址 → 填入系统（前端设置入口，存 webhook.json，仅本机）</li>
+    <li><b>添加告警</b>：热力图悬停股票 → 悬浮窗「＋告警」按钮（或自选面板/搜索）→ 弹窗选择类型（价格/涨跌幅）、方向（≥/≤）、填阈值 → 保存</li>
+    <li><b>运行</b>：server.py 后台每 8 秒拉一次行情 → 规则状态机判定 → 触发即推送到群</li>
+    <li><b>管理</b>：告警面板列表展示全部规则（状态/最近触发时间），可启停、编辑、删除、重置</li>
+  </ol>
+</div>
+
+<h2>六、改动清单（预估）</h2>
+<table>
+  <tr><th>模块</th><th>内容</th><th>规模</th></tr>
+  <tr><td>server.py</td><td>告警引擎：后台轮询线程、/api/alerts CRUD、/api/webhook 配置读写、webhook 发送（含失败重试 2 次）、回滞状态机</td><td>+120~150 行</td></tr>
+  <tr><td>app.js</td><td>告警管理面板：列表渲染、添加/编辑弹窗、启停/删除/重置、悬浮窗「＋告警」入口</td><td>+110~130 行</td></tr>
+  <tr><td>index.html</td><td>面板 DOM + CSS（参照 wlPanel 风格）</td><td>+45~55 行</td></tr>
+  <tr><td>配置文件</td><td>alerts.json（规则）、webhook.json（推送配置，含 key）</td><td>自动生成</td></tr>
+  <tr><td>文档</td><td>README：建群机器人步骤 + 使用说明</td><td>1 节</td></tr>
+</table>
+
+<h2>七、风险与限制</h2>
+<table>
+  <tr><th>风险</th><th>级别</th><th>说明 / 对策</th></tr>
+  <tr><td>webhook key 泄露</td><td><span class="tag warn">中</span></td><td>key 只存本机 webhook.json（不入库不进代码仓库）；任何人拿到 key 可往群里发消息——群机器人无鉴权是平台机制，务必仅本机保存</td></tr>
+  <tr><td>重复推送刷屏</td><td><span class="tag warn">中</span></td><td>回滞复位 + 冷却兜底 + 自动停用选项，三重防抖</td></tr>
+  <tr><td>服务未运行</td><td><span class="tag warn">中</span></td><td>告警依赖 start.bat 的 server.py 常驻；可建议开机自启（可选后续项）</td></tr>
+  <tr><td>网络/接口波动</td><td><span class="tag ok">低</span></td><td>抓取失败静默跳过不误报；推送失败重试 2 次</td></tr>
+  <tr><td>非交易时段无触发</td><td><span class="tag ok">低</span></td><td>价格静止属正常；如需开盘跳空提醒，开盘首轮数据即可判定</td></tr>
+  <tr><td>频率限制</td><td><span class="tag ok">低</span></td><td>群机器人 20 条/分钟，去重后实际远低于上限</td></tr>
+</table>
+
+<h2>八、推送通道备选对比</h2>
+<table>
+  <tr><th>通道</th><th>免费</th><th>配置成本</th><th>送达渠道</th><th>备注</th></tr>
+  <tr><td><b>企业微信群机器人</b></td><td>✓</td><td>低（群内加机器人）</td><td>微信</td><td><b>推荐</b>，与本需求完全匹配</td></tr>
+  <tr><td>钉钉群机器人</td><td>✓</td><td>低</td><td>钉钉</td><td>同模式备选（接口几乎相同）</td></tr>
+  <tr><td>Server酱 / PushPlus</td><td>免费额度</td><td>中</td><td>微信服务号</td><td>需绑定公众号，额度有限</td></tr>
+  <tr><td>邮件 SMTP</td><td>✓</td><td>高</td><td>邮箱</td><td>需邮箱授权码，实时性一般</td></tr>
+  <tr><td>短信</td><td>✗</td><td>—</td><td>手机</td><td>收费，不推荐</td></tr>
+</table>
+
+<h2>九、实施建议</h2>
+<div class="card">
+  <ul>
+    <li><b>一期（推荐一次做完，改动量不大）</b>：server.py 告警引擎 + /api/alerts + webhook 发送 + 前端管理面板 + 悬浮窗入口，约 300 行改动</li>
+    <li><b>二期（可选）</b>：触发历史记录（本地 log）、推送回执展示、规则导入导出</li>
+    <li><b>前置条件</b>：需要你提供一个<b>企业微信群机器人 webhook 地址</b>（获取：企业微信群 → 右上角设置 → 群机器人 → 添加 → 复制地址）；没有群的话可以建一个临时群</li>
+    <li><b>安全约定</b>：webhook key 只写本机 webhook.json，不进 README/聊天记录明文存档（只显示前几位）</li>
+  </ul>
+</div>
+
+<div class="footer">本报告为可行性评估，未改动任何代码。确认后按 v49 实施（server.py 需重启服务生效）。</div>
+</body>
+</html>

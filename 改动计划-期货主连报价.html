@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>改动计划 · 期货主连报价（v25）</title>
+<style>
+  :root { --bg:#0e1117; --panel:#161b26; --border:#232a38; --text:#d7dde8; --muted:#7d8798; --red:#e5484d; --green:#30a46c; --accent:#3b82f6; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; line-height: 1.7; padding: 32px 20px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  h2 { font-size: 17px; margin: 28px 0 12px; padding-left: 10px; border-left: 3px solid var(--accent); }
+  h3 { font-size: 14px; margin: 16px 0 8px; color: #9fb3d9; }
+  p { margin: 8px 0; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .metric { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .metric .v { font-size: 22px; font-weight: 700; }
+  .metric .k { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #232a38; }
+  th { color: var(--muted); font-weight: 600; background: #1a2130; }
+  .up { color: var(--red); font-weight: 700; }
+  .down { color: var(--green); font-weight: 700; }
+  .flat { color: var(--muted); }
+  code { background: #1d2433; border: 1px solid #2a3348; border-radius: 4px; padding: 1px 6px; font-size: 12px; font-family: Consolas, monospace; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid; margin-right: 6px; }
+  .tag.ok { color: #3dd68c; border-color: #3dd68c55; }
+  .tag.warn { color: #f5c542; border-color: #f5c54255; }
+  .tag.info { color: #8ecbff; border-color: #3b82f655; }
+  ul { margin: 8px 0 8px 20px; font-size: 14px; }
+  li { margin: 4px 0; }
+  .timeline { position: relative; margin: 14px 0 14px 6px; padding-left: 22px; border-left: 2px solid #2a3348; }
+  .step { position: relative; margin-bottom: 16px; }
+  .step::before { content: ""; position: absolute; left: -28px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  .step .t { font-weight: 700; font-size: 14px; }
+  .step .d { font-size: 13px; color: var(--muted); }
+  img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); margin: 8px 0; }
+  figcaption { font-size: 12px; color: var(--muted); text-align: center; margin-bottom: 10px; }
+  .sect { margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>改动计划 · 期货主连报价（v25）</h1>
+  <div class="sub">a-share-heatmap · 2026-08-07 · 已上线并通过 autoglm 实测</div>
+
+  <div class="grid">
+    <div class="metric"><div class="v">17</div><div class="k">主力连续合约</div></div>
+    <div class="metric"><div class="v">6</div><div class="k">板块分组</div></div>
+    <div class="metric"><div class="v">8s</div><div class="k">独立实时刷新</div></div>
+    <div class="metric"><div class="v">0</div><div class="k">鉴权接口（全公开 GET）</div></div>
+  </div>
+
+  <div class="sect">
+    <h2>一、背景与目标</h2>
+    <p>在 A 股热力图 + 全球指数地图的基础上，新增期货市场主连报价视图，覆盖黑色、有色、贵金属、能化、农产品、新能源材料六大板块，满足对商品期货（含多晶硅、碳酸锂等新品种）的实时行情查看需求。</p>
+    <p><span class="tag warn">数据源约束</span>仅使用东财公开无鉴权接口（push2delay ulist / clist / suggest），与 A 股、全球指数同通道体系。</p>
+  </div>
+
+  <div class="sect">
+    <h2>二、数据通道与品种清单</h2>
+    <h3>secid 规则：市场前缀 + 品种代码 m（主连）</h3>
+    <table>
+      <tr><th>市场前缀</th><th>交易所</th><th>示例</th></tr>
+      <tr><td>113</td><td>上期所</td><td><code>113.rbm</code> 螺纹主连 / <code>113.cum</code> 沪铜主连</td></tr>
+      <tr><td>114</td><td>大商所</td><td><code>114.im</code> 铁矿石主连 / <code>114.jm</code> 焦炭主连</td></tr>
+      <tr><td>115</td><td>郑商所（代码大写）</td><td><code>115.CFM</code> 棉花主连 / <code>115.SRM</code> 白糖主连</td></tr>
+      <tr><td>142</td><td>上海能源中心</td><td><code>142.scm</code> 原油主连</td></tr>
+      <tr><td>112</td><td>国际</td><td><code>112.B00Y</code> 布伦特原油当月连续</td></tr>
+      <tr><td>225</td><td>广期所</td><td><code>225.psm</code> 多晶硅主连 / <code>225.lcm</code> 碳酸锂主连</td></tr>
+    </table>
+
+    <h3>17 个品种 · 6 大板块</h3>
+    <table>
+      <tr><th>板块</th><th>品种（现价 · 涨跌幅，14:06 快照）</th></tr>
+      <tr><td>黑色系</td><td>螺纹钢 3015.0 <span class="up">+0.30%</span> · 铁矿石 717.0 <span class="up">+0.42%</span> · 焦炭 1877.5 <span class="up">+3.33%</span></td></tr>
+      <tr><td>有色金属</td><td>沪铜 108230 <span class="up">+0.58%</span> · 沪铝 24035 <span class="up">+0.84%</span></td></tr>
+      <tr><td>贵金属</td><td>沪金 932.9 <span class="up">+0.83%</span> · 沪银 15403 <span class="up">+1.22%</span></td></tr>
+      <tr><td>能源化工</td><td>原油 530.3 <span class="up">+4.04%</span> · 布伦特 83.58 <span class="up">+1.32%</span> · PTA 5798 <span class="up">+2.40%</span> · 聚丙烯 8143 <span class="up">+1.93%</span></td></tr>
+      <tr><td>农产品</td><td>豆粕 3106 <span class="up">+0.94%</span> · 棉花 16240 <span class="up">+0.74%</span> · 白糖 5166 <span class="up">+0.88%</span> · 菜油 10153 <span class="up">+0.52%</span></td></tr>
+      <tr><td>新能源材料</td><td>多晶硅 37815 <span class="up">+5.10%</span> · 碳酸锂 142900 <span class="up">+1.36%</span></td></tr>
+    </table>
+  </div>
+
+  <div class="sect">
+    <h2>三、实现清单</h2>
+    <div class="timeline">
+      <div class="step"><div class="t">数据层 · fetch_data.py</div><div class="d">新增 FUTURES 清单（17 secid + 分组）与 fetch_futures()，复用 DOMAINS 多节点容错 + 原子写，生成 futures.json；main() 尾部与 fetch_global() 并列调用（update_data.bat 一次全量刷新三个文件）。</div></div>
+      <div class="step"><div class="t">视图层 · index.html</div><div class="d">Tab 栏新增「期货」按钮；globalView 之后新增 futuresView（fStatus 状态栏 + fList 列表容器）；新增 fg-card/fg-row/fg-pct 等分组卡片样式；版本 bump v25。</div></div>
+      <div class="step"><div class="t">逻辑层 · app.js</div><div class="d">loadFuturesData() 加载 futures.json → renderFutures() 按分组渲染卡片；fetchFuturesQuotes() 8 秒直连东财 ulist 更新内存并重绘；startFuturesLive() 独立定时器（不受 A 股时段/复选框限制）；switchView 支持三视图互斥；主流程不阻塞式加载。</div></div>
+      <div class="step"><div class="t">验证 · autoglm 实测</div><div class="d">期货 Tab 分组渲染、状态栏时间推进、螺纹钢 3016.00→3015.00 实时跳动、A 股/全球指数 Tab 往返切换正常，全部通过。</div></div>
+    </div>
+  </div>
+
+  <div class="sect">
+    <h2>四、实测截图</h2>
+    <figure><img src="screenshot-futures.png" alt="期货视图首屏"><figcaption>期货视图首屏（分组卡片布局）</figcaption></figure>
+    <figure><img src="screenshot-futures-list.png" alt="期货视图完整列表"><figcaption>期货视图完整列表（状态栏「期货实时：✓ 14:10:03 收到 17 条」）</figcaption></figure>
+  </div>
+
+  <div class="sect">
+    <h2>五、已知限制与二期</h2>
+    <ul>
+      <li><span class="tag warn">限制</span>主连合约的 5日/20日/年初至今区间字段东财返回同一值（无真实多周期），故期货视图只展示当日涨跌幅，不做区间联动</li>
+      <li><span class="tag warn">限制</span>中金所股指期货（IF/IC/IH）主连 secid 尚未探到，二期可补</li>
+      <li><span class="tag info">留白</span>Q5500（秦皇岛动力煤现货指数）东财无行情，且用户约束仅允许无鉴权公开接口，未找到公开源前不做</li>
+      <li><span class="tag info">二期</span>期货 K 线详情、品种搜索、主力/次主力切换</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

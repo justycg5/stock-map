@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>成本价功能评估与实施计划（v64）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; background: #0e1420; color: #e8ecf4; line-height: 1.75; padding: 36px 20px; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 25px; margin-bottom: 8px; }
+  .sub { color: #8a94a6; font-size: 14px; margin-bottom: 30px; border-bottom: 1px solid #232d42; padding-bottom: 16px; }
+  .card { background: #161b26; border: 1px solid #2a3550; border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; }
+  .card h2 { font-size: 16px; color: #6ea8ff; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p, .card li { font-size: 14px; color: #c8d0dd; }
+  ul, ol { padding-left: 22px; }
+  li { margin-bottom: 7px; }
+  b { color: #fff; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0; }
+  .metric { background: #1b2333; border: 1px solid #2a3550; border-radius: 10px; padding: 14px 16px; text-align: center; }
+  .metric .v { font-size: 22px; font-weight: 800; color: #6ea8ff; }
+  .metric .k { font-size: 12px; color: #8a94a6; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid #2a3550; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #1b2333; color: #6ea8ff; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .b-green { background: #1f9d5522; color: #4ade80; border: 1px solid #1f9d5555; }
+  .b-red { background: #e5484d22; color: #ff6b6b; border: 1px solid #e5484d55; }
+  .b-blue { background: #2a6fe022; color: #6ea8ff; border: 1px solid #2a6fe055; }
+  .b-gray { background: #4a556822; color: #9aa4b5; border: 1px solid #4a556855; }
+  .tag { color: #ffb454; }
+  .step { display: flex; gap: 14px; margin-bottom: 18px; }
+  .marker { flex: 0 0 30px; height: 30px; border-radius: 50%; background: #2a6fe0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; }
+  .marker.green { background: #1f9d55; }
+  .marker.gray { background: #4a5568; }
+  .step-body { flex: 1; }
+  .step-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .step-text { font-size: 13px; color: #9aa4b5; }
+  .arrow { text-align: center; color: #4a5568; font-size: 16px; margin: -6px 0 6px 15px; }
+  .code { background: #0d1320; border: 1px solid #232d42; border-radius: 6px; padding: 10px 14px; font-family: Consolas, monospace; font-size: 12.5px; color: #9fd0ff; margin: 10px 0; overflow-x: auto; }
+  .warn { background: #3d2c0f; border: 1px solid #8a6d1f; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .ok { background: #0f2b1c; border: 1px solid #1f9d5555; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>成本价功能评估与实施计划</h1>
+  <div class="sub">a-share-heatmap · 拟版本 v64 · 2026-08-12 · 评估结论：可行，推荐方案 B（服务端双写），工作量约 1 个版本 6 个步骤</div>
+
+  <div class="card">
+    <h2>核心结论</h2>
+    <p>在自选股上记录<b>成本价（+可选持仓数量）</b>，在自选面板与悬浮提示中展示<b>持仓盈亏（金额 + 百分比）</b>。数据存储复用「备注」的成熟模式：<b>localStorage + 服务端 costs.json 双写</b>，清浏览器数据不丢（吸取 v57 教训）。现有代码无冲突：自选行渲染（wlRowHtml）、悬浮提示（showWlTip）、服务端 notes/watchlist 存储均为现成模板，改造点清晰。</p>
+    <div class="metrics">
+      <div class="metric"><div class="v">6 步</div><div class="k">实施步骤（v64a~v64f）</div></div>
+      <div class="metric"><div class="v">~200 行</div><div class="k">新增/改动代码量估算</div></div>
+      <div class="metric"><div class="v">0</div><div class="k">新增外部依赖 / 数据源</div></div>
+      <div class="metric"><div class="v">B</div><div class="k">推荐方案（服务端双写）</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>一、需求定义</h2>
+    <table>
+      <tr><th>项</th><th>说明</th></tr>
+      <tr><td>核心能力</td><td>给自选股设置成本价，显示现价 vs 成本的盈亏率；填了数量再显示盈亏额</td></tr>
+      <tr><td>录入方式</td><td>自选面板行内 hover「成本」按钮 → 弹小窗输入成本价（数量可选）→ 保存</td></tr>
+      <tr><td>展示位置</td><td>① 自选面板每行：小字「成本 12.34 · 盈亏 +8.5%」；② 自选悬浮提示：成本价 / 盈亏额 / 盈亏率三行</td></tr>
+      <tr><td>配色</td><td>盈亏正红负绿（与现价涨跌一致），未设成本不显示</td></tr>
+      <tr><td>数据安全</td><td>双写：localStorage 即时 + 服务端 costs.json（防清浏览器丢失），服务不可达静默降级</td></tr>
+      <tr><td>数据模型</td><td><span class="code">{ "600519": { "cost": 1500.5, "qty": 100, "updated_at": 1786416000 } }</span>qty 可缺省（不填则只显示盈亏率）</td></tr>
+    </table>
+    <div class="ok">✓ 数据源纪律合规：成本价是用户手动录入，不依赖任何外部接口，天然符合「无鉴权公开数据源」约束。</div>
+  </div>
+
+  <div class="card">
+    <h2>二、方案对比</h2>
+    <table>
+      <tr><th>方案</th><th>存储</th><th>优点</th><th>缺点</th><th>结论</th></tr>
+      <tr><td><b>A · 纯本地</b></td><td>仅 localStorage</td><td>零服务端改动，最快</td><td>清浏览器数据即丢（用户已踩过自选丢失的坑）</td><td><span class="badge b-red">不推荐</span></td></tr>
+      <tr><td><b>B · 服务端双写</b></td><td>localStorage + costs.json（GET/POST /api/costs）</td><td>与备注/自选备份同构、防丢、离线降级</td><td>服务端约 60 行 + 前端约 140 行</td><td><span class="badge b-green">推荐</span></td></tr>
+      <tr><td>C · 并入 watchlist</td><td>塞进 watchlist.json 条目</td><td>少一个文件</td><td>耦合自选结构、与 v57 备份混存、截断逻辑冲突风险</td><td><span class="badge b-red">不推荐</span></td></tr>
+      <tr><td>D · 备注里解析</td><td>note 文本内嵌「成本:12.34」</td><td>零新 UI</td><td>备注是自由文本，解析脆弱、展示不可控</td><td><span class="badge b-red">不推荐</span></td></tr>
+    </table>
+    <p style="margin-top:10px">方案 B 与 v37 备注、v57 自选备份完全同构：前端一个对象 + 保存函数双写 + 加载时服务端优先兜底，风险最低。</p>
+  </div>
+
+  <div class="card">
+    <h2>三、盈亏计算规则</h2>
+    <table>
+      <tr><th>指标</th><th>公式</th><th>说明</th></tr>
+      <tr><td>盈亏率</td><td>(现价 − 成本) ÷ 成本 × 100%</td><td>必显（有成本即显示），红涨绿跌</td></tr>
+      <tr><td>盈亏额</td><td>(现价 − 成本) × 数量</td><td>仅当填了数量才显示，金额千分位格式化</td></tr>
+      <tr><td>现价来源</td><td>data.json + 盘中 8 秒轮询</td><td>自选面板现价已实时，直接复用，无需新增行情请求</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>四、实施计划（v64，共 6 步）</h2>
+    <div class="step">
+      <div class="marker">1</div>
+      <div class="step-body">
+        <div class="step-title">v64a · 服务端 costs.json + /api/costs</div>
+        <div class="step-text">COSTS_JSON 常量 + GET/POST /api/costs；_clean_costs 清洗（code 截断 12、cost 数值校验 &gt;0、qty 可选 ≥0、非法条目丢弃）、原子写 tmp+os.replace、上限 512KB。→ py_compile → 重启 8080 → API 冒烟（脏数据 / 重启持久化）。</div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="marker">2</div>
+      <div class="step-body">
+        <div class="step-title">v64b · 前端数据层</div>
+        <div class="step-text">costs 对象 + costLoad()（fetch /api/costs，失败降级 localStorage）+ costSave() 双写（500ms 防抖，同 wlSave 模式）+ costGet/costSet/costClear 工具函数。</div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="marker">3</div>
+      <div class="step-body">
+        <div class="step-title">v64c · 自选行显示 + 编辑入口</div>
+        <div class="step-text">wlRowHtml 在现价下加一行「成本 xx · 盈亏 ±x.x%」（设了成本才显示）；行 hover 显示「成本」小按钮 → 弹编辑窗（成本价 / 数量，可清空删除）。index.html 加编辑窗 DOM + v=64。</div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="marker">4</div>
+      <div class="step-body">
+        <div class="step-title">v64d · 自选悬浮提示</div>
+        <div class="step-text">showWlTip 追加「成本价 / 盈亏额 / 盈亏率」三行（设了成本才显示，配色一致）。</div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="marker">5</div>
+      <div class="step-body">
+        <div class="step-title">v64e · 验证</div>
+        <div class="step-text">API 测试（脏数据 / 重启持久化 / 上限截断）+ CDP 全链路：设成本 → 自选行显示盈亏 → 悬浮提示 → 清 localStorage → 刷新从服务端恢复 → 清理测试数据。改 JS 后 bump app.js?v=64。</div>
+      </div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="marker">6</div>
+      <div class="step-body">
+        <div class="step-title">v64f · 文档</div>
+        <div class="step-text">README 增补「成本价」章节 + MEMORY.md 记录 v64。</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>五、风险与边界</h2>
+    <table>
+      <tr><th>风险 / 边界</th><th>处置</th></tr>
+      <tr><td>现价是快照（收盘后静态）</td><td>与全站一致，收盘后盈亏冻结在收盘价，属预期行为</td></tr>
+      <tr><td>成本价录错 / 要改</td><td>随时可重新编辑；编辑窗提供「清空」删除成本</td></tr>
+      <tr><td>服务不可达</td><td>静默降级纯本地（同备注），恢复后下次保存自动回传</td></tr>
+      <tr><td>除权除息 / 分红摊薄成本</td><td><b>不做自动调整</b>（需行情事件源，超范围），用户手动更新成本价即可</td></tr>
+      <tr><td>持仓汇总面板（总盈亏）</td><td>v64 不做，可后续 v65 扩展（本功能数据模型已支持）</td></tr>
+      <tr><td>接入券商真实持仓</td><td><b>不做</b>：需登录鉴权接口，违反数据源纪律</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>六、验收标准</h2>
+    <ol>
+      <li>给自选股设成本价后，自选行出现「成本 + 盈亏%」，颜色正确（盈红亏绿）</li>
+      <li>填数量后悬浮提示显示盈亏额，未填数量不显示金额</li>
+      <li>清空浏览器数据 + 刷新，成本价从服务端恢复（同自选备份行为）</li>
+      <li>成本价支持编辑与清空；非法输入（负数 / 非数字）被服务端清洗拒绝</li>
+      <li>期货等非 A 股品种同样可用（code 维度通用）</li>
+    </ol>
+  </div>
+</div>
+</body>
+</html>

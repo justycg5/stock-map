@@ -1,0 +1,61 @@
+# ===== 密钥与敏感配置（含企业微信 webhook key，绝不上传） =====
+.env
+.env.local
+.env.local.test
+webhook.json
+monitor_webhook.json
+calpush.json
+
+# ===== 运行时生成数据（fetch_data.py / server.py 产生，可重新抓取/再生） =====
+data.json
+global.json
+futures.json
+calendar.json
+calmeta.json
+calstatus.json
+alerts.json
+watchlist.json
+notes.json
+costs.json
+monitor.json
+irmsecid.json
+irmstate.json
+spot.json
+spots.json
+
+# ===== 日志 =====
+log.log
+*.log
+nohup.out
+
+# ===== 备份与中间产物 =====
+*.bak-*
+*.bak
+*.bak.*
+*.old
+*.tmp
+backup_v81_*
+*.polluted-backup-*
+
+# ===== Python 运行时与缓存 =====
+.python/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== 临时 / 运行时目录 =====
+tmp/
+
+# ===== 开发过程截图 =====
+screenshot*.png
+fmap-*.png
+
+# ===== 系统与编辑器文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
