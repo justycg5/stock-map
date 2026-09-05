@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # v31 轻量后端：静态文件 + /api/update（触发 fetch_spot.py 更新现货数据）
 # 用法: python server.py [port]   默认 8080
-import gzip, json, mimetypes, os, re, subprocess, sys, threading, time, urllib.request, datetime
+import gzip, html, json, mimetypes, os, re, subprocess, sys, threading, time, urllib.request, datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +76,7 @@ FUT_NIGHT_TEMPLATES = {
 }
 FUT_NIGHT_MAP = {  # 品种代码 -> 夜盘模板
     "aum": "au_ag", "agm": "au_ag",
+    "scm": "au_ag",  # 原油（上期能源）：夜盘 21:00-次日02:30，与贵金属同窗
     "cum": "metal", "alm": "metal", "znm": "metal", "pbm": "metal",
     "nim": "metal", "snm": "metal", "ssm": "metal",
 }
@@ -977,6 +978,12 @@ IRM_STATE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "irmst
 IRM_INTERVAL_S = 300
 IRM_MAX_SEEN = 2000
 IRM_PUSH_COOLDOWN_S = 60
+_IRM_SSE_INTERVAL_S = 300
+IRM_SSE_SECID_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "irmsseuid.json")
+IRM_SSE_STATE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "irmssestate.json")
+_IRM_SSE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36"
+_last_irm_sse_push = {"ts": 0}
+
 CAL_STATUS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calstatus.json")
 _last_irm_push = {"ts": 0}
 
@@ -1086,6 +1093,14 @@ def _irm_check_and_notify():
         seen |= set(a["id"] for a in fresh)
         state["seen"] = list(seen)[-IRM_MAX_SEEN:]
         _save_json(IRM_STATE_JSON, state)
+        # 时间窗过滤：只推 24h 内的回答（防新加监控股/基线残缺把 30 天历史全量补推）
+        cutoff = time.time() - 24 * 3600
+        recent = [a for a in fresh if (a["ts"] or 0) >= cutoff]
+        if len(recent) < len(fresh):
+            print("[互动易] %d 条超 24h 窗仅吸收不推送" % (len(fresh) - len(recent)), flush=True)
+        fresh = recent
+        if not fresh:
+            return
         lines = []
         for a in sorted(fresh, key=lambda x: x["ts"] or 0)[-8:]:
             q = (a["q"] or "").replace(chr(10), " ")[:60]
@@ -1112,6 +1127,165 @@ def _irm_loop():
         except Exception as e:
             print("[互动易] 轮询异常: %s" % str(e)[:80], flush=True)
         time.sleep(IRM_INTERVAL_S)
+
+
+def _irm_sse_get(url, referer, timeout=12):
+    req = urllib.request.Request(url, headers={"User-Agent": _IRM_SSE_UA, "Referer": referer})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+_TAG_RE = None
+
+def _irm_sse_clean(txt):
+    global _TAG_RE
+    if _TAG_RE is None:
+        _TAG_RE = re.compile(r'<[^>]+>')
+    txt = _TAG_RE.sub(' ', txt)
+    txt = html.unescape(txt)
+    return re.sub(r'\s+', ' ', txt).strip()
+
+
+def _irm_sse_query_uid(code):
+    '''company.do 解析公司 uid（双模式：uid=数字 / uid="数字"）。'''
+    try:
+        comp = _irm_sse_get('http://sns.sseinfo.com/company.do?stockcode=' + code,
+                            'http://sns.sseinfo.com/')
+        m = re.search(r'uid=(\d+)', comp) or re.search(r'uid="(\d+)"', comp)
+        return m.group(1) if m else None
+    except Exception as e:
+        print('[e互动] uid 查询失败 %s: %s' % (code, str(e)[:60]), flush=True)
+        return None
+
+
+def _irm_sse_get_uids(monitor_items):
+    '''批量取沪市股 uid（缓存 irmsseuid.json）；只处理 60/68 开头，深市与 B 股跳过。'''
+    cache = _load_json(IRM_SSE_SECID_JSON, {})
+    changed = False
+    out = {}
+    for it in monitor_items:
+        code = str(it.get('code') or '')
+        if not (code.startswith('60') or code.startswith('68')):
+            continue
+        if code in cache:
+            out[code] = cache[code]
+            continue
+        uid = _irm_sse_query_uid(code)
+        if uid:
+            cache[code] = uid
+            out[code] = uid
+            changed = True
+            print('[e互动] uid 解析 %s → %s' % (code, uid), flush=True)
+        time.sleep(0.5)
+    if changed:
+        _save_json(IRM_SSE_SECID_JSON, cache)
+    return out
+
+
+def _irm_sse_fetch_answers(uid_by_code):
+    '''逐只拉 type=11（董秘已回复）feed；返回 [{id,code,name,q,a,ts}]；全部失败返回 None。'''
+    if not uid_by_code:
+        return []
+    out = []
+    err_cnt = 0
+    for code, uid in sorted(uid_by_code.items()):
+        try:
+            body = _irm_sse_get(
+                'http://sns.sseinfo.com/ajax/userfeeds.do?typeCode=company&type=11&pageSize=100&uid=%s&page=1' % uid,
+                'http://sns.sseinfo.com/company.do?stockcode=' + code)
+        except Exception as e:
+            err_cnt += 1
+            print('[e互动] 抓取失败 %s: %s' % (code, str(e)[:60]), flush=True)
+            time.sleep(0.6)
+            continue
+        time.sleep(0.6)
+        name = ''
+        segs = re.split(r'<div class="m_feed_item"\s+id="item-', body)
+        for seg in segs[1:]:
+            m = re.match(r'(\d+)', seg)
+            if not m:
+                continue
+            iid = m.group(1)
+            qa_at = seg.find('m_feed_detail m_qa')
+            if qa_at < 0:
+                continue
+            q_part, a_part = seg[:qa_at], seg[qa_at:]
+            if not name:
+                mn = re.search(r'<img title="([^"]+)"[^>]*avatar/company', a_part)
+                if mn:
+                    name = mn.group(1)
+            mq = re.search(r'<div class="m_feed_txt"[^>]*>(.*?)</div>', q_part, re.S)
+            question = _irm_sse_clean(mq.group(1)) if mq else ''
+            question = re.sub(r'^[:：]?\S+?\(\d{6}\)', '', question).strip()
+            ma = re.search(r'<div class="m_feed_txt"[^>]*>(.*?)</div>', a_part, re.S)
+            answer = _irm_sse_clean(ma.group(1)) if ma else ''
+            if not answer:
+                continue
+            at = re.search(r'(\d{4})年(\d{2})月(\d{2})日\s*(\d{2}):(\d{2})', a_part)
+            ats = ('%s-%s-%s %s:%s' % at.groups()) if at else ''
+            out.append({'id': iid, 'code': code, 'name': name, 'q': question, 'a': answer, 'ts': ats})
+    if err_cnt and err_cnt >= len(uid_by_code):
+        return None
+    return out
+
+
+def _irm_sse_check_and_notify():
+    '''单轮 e互动检查：diff 新回复 → 合并推送公告监控群。冷启动静默吸收；空结果不破坏 seen。'''
+    monitor_items = _irm_monitor_items()
+    uid_by_code = _irm_sse_get_uids(monitor_items)
+    answers = _irm_sse_fetch_answers(uid_by_code)
+    if answers is None:
+        return
+    state = _load_json(IRM_SSE_STATE_JSON, {}) or {}
+    seen = set(str(x) for x in (state.get('seen') or []))
+    bootstrapped = bool(state.get('bootstrapped'))
+    fresh = [a for a in answers if str(a['id']) not in seen]
+    if not bootstrapped:
+        seen |= set(str(a['id']) for a in answers)
+        state = {'bootstrapped': True, 'seen': list(seen)[-IRM_MAX_SEEN:]}
+        _save_json(IRM_SSE_STATE_JSON, state)
+        print('[e互动] 基线吸收 %d 条回复' % len(answers), flush=True)
+        return
+    if fresh:
+        seen |= set(str(a['id']) for a in fresh)
+        state['seen'] = list(seen)[-IRM_MAX_SEEN:]
+        _save_json(IRM_SSE_STATE_JSON, state)
+        # 时间窗过滤：只推 24h 内的回复（防首轮超时/基线残缺导致历史问答补推）
+        cutoff = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 24 * 3600))
+        recent = [a for a in fresh if (a['ts'] or '') >= cutoff]
+        if len(recent) < len(fresh):
+            print('[e互动] %d 条超 24h 窗仅吸收不推送' % (len(fresh) - len(recent)), flush=True)
+        fresh = recent
+        if not fresh:
+            return
+        lines = []
+        for a in sorted(fresh, key=lambda x: x['ts'] or '')[-8:]:
+            q = (a['q'] or '').replace(chr(10), ' ')[:60]
+            ans = (a['a'] or '').replace(chr(10), ' ')[:100]
+            lines.append('%s(%s)' % (a['name'] or a['code'], a['code']))
+            lines.append('Q: ' + q)
+            lines.append('A: ' + ans)
+        if lines:
+            now = time.time()
+            if now - _last_irm_sse_push['ts'] >= IRM_PUSH_COOLDOWN_S:
+                _last_irm_sse_push['ts'] = now
+                murl = _monitor_webhook_url()
+                if murl:
+                    text = '【董秘互动 · 新回复(沪)】' + chr(10) + chr(10).join(lines[:24])
+                    ok, err = _send_webhook_url(murl, text)
+                    print('[e互动推送] %s（%d 条）' % ('成功' if ok else '失败:' + str(err)[:60], len(fresh)), flush=True)
+            else:
+                print('[e互动推送] 冷却中跳过 %d 条' % len(fresh), flush=True)
+        print('[e互动] 新回复 %d 条' % len(fresh), flush=True)
+
+
+def _irm_sse_loop():
+    while True:
+        try:
+            _irm_sse_check_and_notify()
+        except Exception as e:
+            print('[e互动] 轮询异常: %s' % str(e)[:80], flush=True)
+        time.sleep(_IRM_SSE_INTERVAL_S)
 
 
 def _fetch_calendar(min_gap=0):
@@ -1459,6 +1633,7 @@ if __name__ == "__main__":
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=_calendar_loop, daemon=True).start()
     threading.Thread(target=_irm_loop, daemon=True).start()
+    threading.Thread(target=_irm_sse_loop, daemon=True).start()
     print("A股云图服务: http://127.0.0.1:%d/  (现货更新 /api/update | 手动重抓 /api/refetch | 备注读写 /api/notes | 告警 /api/alerts)" % port)
     try:
         srv.serve_forever()
