@@ -63,6 +63,9 @@ const FONT_FAMILY = "'Microsoft YaHei','PingFang SC',system-ui,sans-serif";
 // ---------- 状态 ----------
 let W = 0, H = 0, dpr = 1;
 let scale = 1, offsetX = 0, offsetY = 0, baseScale = 1;
+let WORLD_W = 1;   // 世界宽度（横屏=1 正方形画布；竖屏=W/H<1 → 宽满屏）
+let WORLD_H = 1;   // v91 世界高度：横屏恒 1；竖屏由 placeGroups 行高下限决定（组格加高，允许整图超出屏长，拖拽/双击空白浏览）
+let _viewAdjusted = false;
 let root = null;        // 树根
 let current = null;     // 当前视图节点
 let layoutCache = null; // 当前层布局缓存 [{node, x, y, w, h}]
@@ -144,6 +147,58 @@ function recalcNodePcts(node, children) {
 }
 
 function buildTree(payload) {
+  // v89：三层树（一级 → 二级 → 个股）；sectors 由 fetch 端生成，缺失时回退二级两层
+  if (payload.sectors && payload.sectors.length) {
+    const mkStock = st => ({
+      name: st.name, code: st.code, industry: st.industry || "其他",
+      value: st.mcap && st.mcap > 0 ? st.mcap : 0.1,
+      price: st.price, pct: st.pct, chg: st.chg,
+      amount: st.amount, mcap: st.mcap,
+      pct5: st.pct5, pct10: st.pct10, pct20: st.pct20, pct60: st.pct60, pctYTD: st.pctYTD,
+      leaf: true, parent: null,
+    });
+    const mkInd = ind => {
+      const stocks = ind.stocks.map(mkStock);
+      const node = {
+        name: ind.name, value: ind.total_mcap && ind.total_mcap > 0 ? ind.total_mcap : 0.1,
+        pe: ind.pe,
+        pct: weightedPct(ind.stocks), pct5: weightedPct(ind.stocks, "pct5"),
+        pct10: weightedPct(ind.stocks, "pct10"), pct20: weightedPct(ind.stocks, "pct20"),
+        pct60: weightedPct(ind.stocks, "pct60"), pctYTD: weightedPct(ind.stocks, "pctYTD"),
+        children: stocks, leaf: false, parent: null,
+      };
+      for (const s of stocks) s.parent = node;
+      return node;
+    };
+    const secs = payload.sectors.map(sec => {
+      const indNodes = sec.children.map(mkInd);
+      const node = {
+        name: sec.name, value: sec.total_mcap && sec.total_mcap > 0 ? sec.total_mcap : 0.1,
+        pe: sec.pe,
+        pct: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), [])),
+        pct5: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), []), "pct5"),
+        pct10: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), []), "pct10"),
+        pct20: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), []), "pct20"),
+        pct60: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), []), "pct60"),
+        pctYTD: weightedPct(indNodes.reduce((a, x) => (a.push.apply(a, x.children), a), []), "pctYTD"),
+        children: indNodes, leaf: false, parent: null,
+      };
+      for (const c of indNodes) c.parent = node;
+      return node;
+    });
+    const allStocks3 = payload.sectors.reduce((a, s) => a.concat(s.children.reduce((b, ind) => b.concat(ind.stocks), [])), []);
+    const rootNode3 = {
+      name: "全部A股",
+      value: secs.reduce((s, x) => s + x.value, 0),
+      pct: weightedPct(allStocks3), pct5: weightedPct(allStocks3, "pct5"),
+      pct10: weightedPct(allStocks3, "pct10"), pct20: weightedPct(allStocks3, "pct20"),
+      pct60: weightedPct(allStocks3, "pct60"), pctYTD: weightedPct(allStocks3, "pctYTD"),
+      children: secs, leaf: false, parent: null,
+    };
+    for (const s of secs) s.parent = rootNode3;
+    rootNode3._sectors = secs;
+    return rootNode3;
+  }
   const inds = payload.industries.map(ind => {
     const stocks = ind.stocks.map(st => ({
       name: st.name, code: st.code, industry: st.industry || "其他",
@@ -186,49 +241,134 @@ function buildTree(payload) {
 
 // ---------- 视图控制 ----------
 function resetView() {
-  scale = baseScale;
-  offsetX = (W - scale) / 2;
-  offsetY = (H - scale) / 2;
+  // v92：竖屏且内容超长（WORLD_H>1）时，以宽满屏为准（scale=W/WORLD_W），高度允许拖拽浏览
+  const fitW = W / WORLD_W;
+  const fitH = H / WORLD_H;
+  scale = Math.min(baseScale, fitW, fitH === Infinity ? baseScale : fitH);
+  if (WORLD_H <= 1) scale = baseScale;
+  offsetX = (W - WORLD_W * scale) / 2;
+  offsetY = Math.min(0, (H - WORLD_H * scale) / 2);   // 超长时顶对齐（从内容顶部开始看）
 }
+
+const HEADER_H = 0.036;   // 组标头预留带（世界单位，placeGroups 与 draw 共用）
 
 function relayout() {
   const kids = current.children;
-  // 板块首页（根视图）：涨/跌板块分区展示，组内按涨跌幅排序
-  if (current === root) {
+  // v90 根视图：129 个二级行业按申万一级分组展示（外层组区 + 组内二级格），保留涨跌分区语义
+  if (current === root && root._sectors) {
     const pctOf = c => rangePctOf(c);
+    // 组（一级）按加权涨跌幅分涨跌两区，区内按强度排（与旧板块排序语义一致，单位变为组）
+    const gs = root._sectors;
+    const rf = rangeField();   // v90：分区/排序随区间联动（当日/5日/…/YTD）
+    const gv = g => { const v = g[rf]; return (v === null || v === undefined || isNaN(v)) ? null : v; };
     const up = [], down = [];
-    for (const c of kids) {
-      if (pctOf(c) !== null && pctOf(c) < 0) down.push(c);
-      else up.push(c);
+    for (const g of gs) {
+      const v = gv(g);
+      if (v !== null && v < 0) down.push(g);
+      else up.push(g);
     }
-    const cmpUp = (a, b) => {
-      const pa = pctOf(a), pb = pctOf(b);
-      if (pa === null) return 1; if (pb === null) return -1;
-      return pb - pa; // 涨幅从高到低
-    };
-    const cmpDown = (a, b) => {
-      const pa = pctOf(a), pb = pctOf(b);
-      if (pa === null) return 1; if (pb === null) return -1;
-      return pa - pb; // 跌幅从大到小（-5 在 -1 前）
-    };
-    up.sort(cmpUp);
-    down.sort(cmpDown);
+    const cmpUp = (a, b) => (gv(b) || 0) - (gv(a) || 0);
+    // 下跌区：跌幅小（更接近 0）靠前，跌幅大靠后
+    const cmpDown = (a, b) => (gv(b) || 0) - (gv(a) || 0);
+    up.sort(cmpUp); down.sort(cmpDown);
     const kU = up.length, kD = down.length;
-    const GAP = 0.006; // 涨跌区之间的分隔间隙
+    const GAP = 0.006;
     const total = kU + kD;
     const hU = total > 0 ? (kU / total) * (1 - GAP) : 1 - GAP;
     layoutCache = [];
-    if (kU > 0) {
-      layoutCache = layoutCache.concat(
-        layoutGrid(up, 0, 0, 1, hU, (a, b) => cmpUp(a.node, b.node))
-          .map(r => ({ node: up[r.i], x: r.x, y: r.y, w: r.w, h: r.h }))
-      );
-    }
+    // 组区外层布局：面积 ∝ 组内二级行业数（layoutGrid 按第三参对象 value；这里构造 wrapper）
+    const gsWrap = arr => arr.map(g => ({ g: g, value: g.children.length }));
+    const placeGroups = (arr, x, y, w, h, cmp) => {
+      const items = gsWrap(arr);
+      items.sort((a, b) => cmp(a.g, b.g));
+      const k = items.length;
+      if (!k) return;
+      let cols = Math.max(1, Math.ceil(Math.sqrt(k * (w / h))));
+      if (WORLD_W < 1) cols = Math.min(cols, 3);   // 竖屏手机：每行最多 3 组（屏幕窄）
+      const rows = Math.ceil(k / cols);
+      const cw = w / cols;
+      // v92 移动端：行高按内容分配（每行的组 = 同 r 下 c 0..cols-1 连续 idx）
+      const rowItems = [];   // rowItems[r] = items 数组（该行实际组）
+      for (let r = 0; r < rows; r++) {
+        const row = [];
+        for (let c = 0; c < cols; c++) {
+          const idx = r * cols + c;
+          if (idx < items.length) row.push(items[idx]);
+        }
+        if (row.length) rowItems.push(row);
+      }
+      const rowH = (rr, row) => {
+        // 行高 ∝ 该行最大组内行数（srows）；含 2 行二级格的组占更高；单行组占低
+        const ghhMax = h - HEADER_H * rowItems.length;   // 全部行扣除各自标头后总可用高
+        let maxS = 1;
+        for (const it of row) {
+          const kn = it.g.children.length;
+          if (!kn) continue;
+          const sc = Math.max(1, Math.ceil(Math.sqrt(kn * (cw / Math.max(ghhMax / rowItems.length, 0.01)))));
+          maxS = Math.max(maxS, Math.ceil(kn / sc));
+        }
+        return maxS;
+      };
+      // 行高权重：srows 数（含2行的组权重2，单行权重1）
+      const wRow = rowItems.map((row, rr) => rowH(rr, row));
+      const wSum = wRow.reduce((a, b) => a + b, 0);
+      let unit = (h - HEADER_H * rowItems.length) / wSum;   // 每"行单位"高度
+      // v92 移动端：行单位高下限（屏幕 px 换算世界单位），保证组内格子可读；总高超出屏 → WORLD_H>1，可拖拽浏览
+      if (WORLD_W < 1) {
+        const MIN_ROW_PX = 46;
+        const minUnitWorld = MIN_ROW_PX / scale;
+        if (unit < minUnitWorld) unit = minUnitWorld;
+      }
+      let yCursor = 0;
+      for (let r = 0; r < rowItems.length; r++) {
+        const row = rowItems[r];
+        const ch = HEADER_H + wRow[r] * unit;                 // 本行总高 = 标头 + 行单位高×权重
+        const ghh = ch - HEADER_H;                            // 本行组内容高
+        for (let c = 0; c < row.length; c++) {
+          const gx = x + c * cw, gy = y + yCursor + HEADER_H;
+          const secs = row[c].g.children.slice();
+          secs.sort((a, b) => {
+            const pa = pctOf(a), pb = pctOf(b);
+            if (pa === null) return 1; if (pb === null) return -1;
+            return pb - pa;
+          });
+          const kn = secs.length;
+          if (!kn) continue;
+          const scols = Math.max(1, Math.ceil(Math.sqrt(kn * (cw / ghh))));   // v92：组内排列与桌面同公式（自然自适应组宽）
+          const srows = Math.ceil(kn / scols);
+          const sw = cw / scols, sh = ghh / srows;
+          const fullRows = Math.floor(kn / scols);      // 满行数
+          const lastCnt = kn - fullRows * scols;        // 末行格数（0=无末行残留）
+          let si = 0;
+          for (let sr = 0; sr < srows; sr++) {
+            // v90 方案C：末行不满时拉宽占满组宽（消除组内空白）
+            const inLast = sr === srows - 1 && lastCnt > 0;
+            const rCols = inLast ? lastCnt : scols;
+            const rW = inLast ? cw / lastCnt : sw;
+            for (let sc = 0; sc < rCols && si < kn; sc++, si++) {
+              layoutCache.push({
+                node: secs[si],
+                x: gx + sc * rW, y: gy + sr * sh, w: rW, h: sh,
+                _grp: row[c].g,   // 归属组（标头/边框用）
+              });
+            }
+          }
+        }
+        yCursor += ch;
+      }
+      return yCursor;
+    };
+    let worldH = 1;
+    if (kU > 0) worldH = placeGroups(up, 0, 0, WORLD_W, hU, cmpUp) || hU;
     if (kD > 0) {
-      layoutCache = layoutCache.concat(
-        layoutGrid(down, 0, hU + GAP, 1, 1 - hU - GAP, (a, b) => cmpDown(a.node, b.node))
-          .map(r => ({ node: down[r.i], x: r.x, y: r.y, w: r.w, h: r.h }))
-      );
+      const dH = placeGroups(down, 0, worldH + GAP, WORLD_W, Math.max(worldH + 0.3, 1) - worldH - GAP, cmpDown);
+      worldH = Math.max(worldH + GAP + (dH || 0), worldH);
+    }
+    WORLD_H = Math.max(1, worldH);
+    // 首次布局后校正视口（竖屏超长场景）：只在 resetView 语义下自动调用一次
+    if (WORLD_W < 1 && WORLD_H > 1 && !_viewAdjusted) {
+      _viewAdjusted = true;
+      resetView();
     }
     return;
   }
@@ -240,7 +380,7 @@ function relayout() {
     if (pb === null) return -1;
     return pb - pa;
   };
-  layoutCache = layoutGrid(kids, 0, 0, 1, 1, pctSort)
+  layoutCache = layoutGrid(kids, 0, 0, WORLD_W, 1, pctSort)
     .map(r => ({ node: kids[r.i], x: r.x, y: r.y, w: r.w, h: r.h }));
 }
 
@@ -335,6 +475,76 @@ function draw() {
   ctx.lineWidth = 1;
   for (const v of vis) {
     ctx.strokeRect(v.s.x + 0.5, v.s.y + 0.5, Math.max(v.s.w - 1, 0), Math.max(v.s.h - 1, 0));
+  }
+
+  // v90 根视图分组：组边界 + 组名标头（_grp 相同的格子构成一个组区）
+  if (current === root && root._sectors && vis.length && vis[0].r._grp) {
+    const byGrp = new Map();
+    for (const v of vis) {
+      const g = v.r._grp;
+      if (!g) continue;
+      let b = byGrp.get(g);
+      if (!b) { b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity, g: g }; byGrp.set(g, b); }
+      b.x0 = Math.min(b.x0, v.s.x); b.y0 = Math.min(b.y0, v.s.y);
+      b.x1 = Math.max(b.x1, v.s.x + v.s.w); b.y1 = Math.max(b.y1, v.s.y + v.s.h);
+    }
+    ctx.save();
+    for (const b of byGrp.values()) {
+      const label = b.g.name;
+      const gp = b.g[rangeField()];
+      const hasGp = gp !== undefined && gp !== null;
+      // 标头尺寸（带内底部对齐；字号随缩放自适应，钳制保底可读）
+      const bandPx = HEADER_H * scale;                            // 预留带总高（屏幕 px）
+      // v92 缩小适配：框边距/线宽随 scale 收敛（scale<400 线性衰减），缩小时相邻组框不再互相遮挡
+      const shrink = Math.min(1, scale / 400);
+      const pad = 2.5 * shrink;
+      const lw1 = 4 * shrink, lw2 = Math.max(0.5, 1.6 * shrink);
+      const bh = Math.max(12, Math.min(bandPx - 6, 24));          // 标题条高（带内可容纳，随缩放收敛）
+      const fs1 = Math.max(9, Math.min(15, bh * 0.62));           // 组名字号
+      const fs2 = Math.max(8.5, Math.min(13, bh * 0.53));         // 涨跌幅字号
+      const pw = hasGp ? Math.max(44, Math.min(74, bh * 2.9)) : 0; // 涨跌幅色块宽
+      const hy = b.y0 - pad - bh;                                 // 标题条底=本组格顶-pad
+      // 组框：包裹「标题条 + 格子区」整体，四边封闭（标题条通栏宽）
+      const bx = b.x0 - pad, by = hy - pad;                        // 框顶=标题条上缘
+      const bw = (b.x1 - b.x0) + pad * 2, bh2 = (b.y1 - hy) + pad * 2; // 框高=标题条+格子区
+      // 标题条底色（通栏）
+      ctx.fillStyle = "rgba(13,17,27,0.96)";
+      ctx.fillRect(bx, hy, bw, bh);
+      ctx.fillStyle = "rgba(190,205,230,0.9)";
+      ctx.fillRect(bx, hy, 3, bh);   // 左侧亮色竖条
+      ctx.font = "700 " + fs1.toFixed(1) + "px " + FONT_FAMILY;
+      const tw = ctx.measureText(label).width;
+      ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#f2f6fd";
+      ctx.fillText(label, bx + 9, hy + bh / 2 + 0.5);
+      if (hasGp) {
+        const up = gp >= 0;
+        const ps = (up ? "+" : "") + Number(gp).toFixed(2) + "%";
+        const px0 = bx + tw + 14;
+        ctx.fillStyle = up ? "rgba(224,49,49,0.95)" : "rgba(15,143,91,0.95)";
+        ctx.fillRect(px0, hy + 3, pw, bh - 6);
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 " + fs2.toFixed(1) + "px " + FONT_FAMILY;
+        ctx.textAlign = "center";
+        ctx.fillText(ps, px0 + pw / 2, hy + bh / 2 + 0.5);
+        ctx.textAlign = "left";
+      }
+      // 标题条与格子区之间：弱分隔线（视觉分层，不抢组框主线条）
+      ctx.strokeStyle = "rgba(190,205,230,0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx, hy + bh);
+      ctx.lineTo(bx + bw, hy + bh);
+      ctx.stroke();
+      // 组边界：两层描边（外层深色宽线 + 内层亮色细线），包裹整体、实线醒目
+      ctx.strokeStyle = "rgba(2,6,15,0.9)";
+      ctx.lineWidth = lw1;
+      ctx.strokeRect(bx, by, bw, bh2);
+      ctx.strokeStyle = "rgba(190,205,230,0.85)";
+      ctx.lineWidth = lw2;
+      ctx.strokeRect(bx, by, bw, bh2);
+    }
+    ctx.restore();
   }
 
   // 标签
@@ -555,6 +765,7 @@ function hitNoteIcon(mx, my, node) {
 // ---------- 交互 ----------
 let dragging = false, dragStartX = 0, dragStartY = 0, moved = 0;
 let downPos = null, downTime = 0;
+let lastTapName = null, lastTapTime = 0;   // 手动双击检测（行业格子：400ms 内同名两击 → 下钻）
 
 cv.addEventListener("pointerdown", e => {
   dragging = true; moved = 0;
@@ -600,9 +811,37 @@ cv.addEventListener("pointerup", e => {
     const node = nodeAtScreen(e.clientX - rect.left, e.clientY - rect.top);
     if (node && node.leaf && hitNoteIcon(e.clientX - rect.left, e.clientY - rect.top, node)) {
       openNoteEditor(node.code, node.name, e.clientX, e.clientY);
-    } else if (node && !node.leaf) { hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; } // v84 tap 行业显示并锁定浮层，点浮层内「下钻」按钮才进入成分股
-    else if (node && node.leaf) { hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; } // v74 tap 股票显示并锁定浮层
-    else { tooltip.style.display = "none"; tooltipLocked = false; } // v73 tap 空白隐藏 tooltip
+    } else if (node && !node.leaf) {
+      // v90 双击行业格子 → 直接下钻（400ms 内同名两击；手动检测，不依赖 dblclick 事件）
+      const now = performance.now();
+      if (lastTapName === node.name && (now - lastTapTime) < 400) {
+        lastTapName = null; lastTapTime = 0;
+        tooltip.style.display = "none"; tooltipLocked = false;
+        drillInto(node);
+      } else {
+        lastTapName = node.name; lastTapTime = now;
+        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; // v84 tap 行业显示并锁定浮层，点浮层内「下钻」按钮才进入成分股
+      }
+    }
+    else if (node && node.leaf) {
+      // v90 双击股票 → 跳雪球（与行业同款手动双击检测）
+      const now2 = performance.now();
+      if (lastTapName === node.code && (now2 - lastTapTime) < 400) {
+        lastTapName = null; lastTapTime = 0;
+        window.open("https://xueqiu.com/S/" + xueqiuSymbol(node.code), "_blank");
+      } else {
+        lastTapName = node.code; lastTapTime = now2;
+        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; // v74 tap 股票显示并锁定浮层
+      }
+    }
+    else {
+      // v90 双击空白 → 返回上级（原 dblclick 语义）
+      const now3 = performance.now();
+      const isDbl = lastTapName === "__blank__" && (now3 - lastTapTime) < 400;
+      lastTapName = "__blank__"; lastTapTime = now3;
+      tooltip.style.display = "none"; tooltipLocked = false; // v73 tap 空白隐藏 tooltip
+      if (isDbl) goUp();
+    }
   }
   downPos = null;
 });
@@ -1031,18 +1270,7 @@ function xueqiuSymbol(code) {
   return "SH" + c;                                // 沪主板/科创板（60/68/9）及兜底
 }
 
-cv.addEventListener("dblclick", e => {
-  e.preventDefault();
-  const rect = cv.getBoundingClientRect();
-  const node = nodeAtScreen(e.clientX - rect.left, e.clientY - rect.top);
-  if (node && node.leaf) {
-    // 双击股票 → 跳转雪球个股详情页
-    window.open("https://xueqiu.com/S/" + xueqiuSymbol(node.code), "_blank");
-  } else {
-    // 双击板块或空白 → 返回上级
-    goUp();
-  }
-});
+// v90 双击语义统一走 pointerup tap 手动双击检测（dblclick 事件在指针捕获下不可靠，已移除）
 
 cv.addEventListener("wheel", e => {
   e.preventDefault();
@@ -1061,8 +1289,18 @@ cv.addEventListener("wheel", e => {
 window.addEventListener("resize", () => {
   const oldW = W, oldH = H;
   sizeCanvas();
-  offsetX += (W - oldW) / 2;
-  offsetY += (H - oldH) / 2;
+  // v91：WORLD_W 变化（横竖切换）→ baseScale/视图重算；否则保持平移增量
+  const baseWas = baseScale;
+  baseScale = (WORLD_W < 1 ? H : Math.min(W, H)) * 0.98;
+  if (WORLD_W !== (oldH > oldW * 1.05 ? oldW / oldH : 1)) {
+    // 横竖切换：直接重置视图（比例变化太大，增量无意义）
+    resetView();
+    relayout();
+  } else {
+    baseScale = (baseWas > 0) ? baseScale : baseWas;
+    offsetX += (W - oldW) / 2;
+    offsetY += (H - oldH) / 2;
+  }
   draw();
 });
 
@@ -1137,24 +1375,31 @@ function showDropdown(q) {
   if (!root) return;
   const up = q.toUpperCase();
   const hits = [];
-  // 行业匹配（v70）：行业名子串模糊，精确优先
-  for (const ind of root.children) {
-    if (ind.name.indexOf(q) >= 0) {
-      hits.push({ type: "ind", ind: ind, score: ind.name === q ? 0 : 1 });
-    }
-  }
-  // 股票匹配
-  for (const ind of root.children) {
-    for (const st of ind.children) {
-      const matchCode = st.code.indexOf(up) === 0;
-      const matchCodeIn = !matchCode && st.code.indexOf(up) >= 0;
-      const matchName = st.name.indexOf(q) >= 0;
-      if (matchCode || matchName || matchCodeIn) {
-        hits.push({ type: "st", st: st, ind: ind.name, score: (matchCode ? 2 : matchName ? 3 : 4) });
-        if (hits.length >= 60) break;
+  // 行业匹配（v90 三层）：二级行业为主，一级行业兜底（低分）
+  for (const sec of root.children) {
+    for (const ind of sec.children) {
+      if (ind.name.indexOf(q) >= 0) {
+        hits.push({ type: "ind", ind: ind, score: ind.name === q ? 0 : 1 });
       }
     }
-    if (hits.length >= 60) break;
+  }
+  for (const sec of root.children) {
+    if (sec.name.indexOf(q) >= 0) hits.push({ type: "ind", ind: sec, score: 2 });
+  }
+  // 股票匹配（三层遍历到个股）
+  outer2:
+  for (const sec of root.children) {
+    for (const ind of sec.children) {
+      for (const st of ind.children) {
+        const matchCode = st.code.indexOf(up) === 0;
+        const matchCodeIn = !matchCode && st.code.indexOf(up) >= 0;
+        const matchName = st.name.indexOf(q) >= 0;
+        if (matchCode || matchName || matchCodeIn) {
+          hits.push({ type: "st", st: st, ind: ind.name, score: (matchCode ? 2 : matchName ? 3 : 4) });
+          if (hits.length >= 60) break outer2;
+        }
+      }
+    }
   }
   hits.sort((a, b) => a.score - b.score);
   const top = hits.slice(0, 12);
@@ -1198,11 +1443,13 @@ function goToStock(code) {
   if (!root) return;
   // 找股票所在行业
   let indNode = null, stockNode = null;
-  for (const ind of root.children) {
-    for (const st of ind.children) {
-      if (st.code === code) { indNode = ind; stockNode = st; break; }
+  outer:
+  for (const sec of root.children) {
+    for (const ind of sec.children) {
+      for (const st of ind.children) {
+        if (st.code === code) { indNode = ind; stockNode = st; break outer; }
+      }
     }
-    if (stockNode) break;
   }
   if (!stockNode) return;
   // 下钻到行业
@@ -1230,9 +1477,27 @@ function goToSector(name) {
     current = root;
     relayout();
   }
-  const indNode = root.children.find(c => c.name === name);
+  let indNode = root.children.find(c => c.name === name) || null;
+  if (!indNode) {
+    for (const sec of root.children) {
+      const hit = sec.children.find(c => c.name === name);
+      if (hit) { indNode = hit; break; }
+    }
+  }
   if (!indNode) return;
-  const r = rectOfNode(indNode);
+  let r = rectOfNode(indNode);
+  if (!r) {
+    // 一级组无独立 rect：取本组二级成员的并集矩形
+    let x1 = 1e18, y1 = 1e18, x2 = -1e18, y2 = -1e18, any = false;
+    for (const rc of layoutCache) {
+      const p = rc.node ? rc.node.parent : null;
+      if (p === indNode) {
+        any = true; x1 = Math.min(x1, rc.x); y1 = Math.min(y1, rc.y);
+        x2 = Math.max(x2, rc.x + rc.w); y2 = Math.max(y2, rc.y + rc.h);
+      }
+    }
+    if (any) r = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
   if (r) zoomToNode(r, 0.55);
   highlight = { name: name, t0: performance.now() };
   renderCrumb();
@@ -1282,17 +1547,21 @@ async function fetchOnce(showStatus) {
     root = buildTree(payload);
     // 合并实时价格：60 秒结构刷新不丢失实时行情（避免盘中价格跳回快照值）
     if (oldIdx && oldIdx.size > 0) {
-      for (const ind of root.children) {
-        for (const st of ind.children) {
-          const o = oldIdx.get(st.code);
-          if (o) {
-            st.price = o.price; st.pct = o.pct; st.chg = o.chg; st.amount = o.amount;
-            st.pct5 = o.pct5; st.pct10 = o.pct10; st.pct20 = o.pct20; st.pct60 = o.pct60; st.pctYTD = o.pctYTD;
+      // v90 三层树：合并到个股层（第三层），再自下而上重算 二级→一级→root
+      for (const sec of root.children) {
+        for (const ind of sec.children) {
+          for (const st of ind.children) {
+            const o = oldIdx.get(st.code);
+            if (o) {
+              st.price = o.price; st.pct = o.pct; st.chg = o.chg; st.amount = o.amount;
+              st.pct5 = o.pct5; st.pct10 = o.pct10; st.pct20 = o.pct20; st.pct60 = o.pct60; st.pctYTD = o.pctYTD;
+            }
           }
+          recalcNodePcts(ind, ind.children);
         }
-        recalcNodePcts(ind, ind.children);
+        recalcNodePcts(sec, sec.children.reduce((x, ind) => x.concat(ind.children), []));
       }
-      recalcNodePcts(root, root.children.reduce((x, ind) => x.concat(ind.children), []));
+      recalcNodePcts(root, root.children.reduce((x, sec) => x.concat(sec.children.reduce((y, ind) => y.concat(ind.children), [])), []));
     }
     buildCodeIndex();
     if (wlPanelOpen) renderWatchlist();
@@ -1302,7 +1571,11 @@ async function fetchOnce(showStatus) {
     // 保留当前下钻视图（按名字匹配），否则回根
     if (oldCurrentName && oldCurrentName !== "全部A股") {
       let found = null;
-      for (const ind of root.children) if (ind.name === oldCurrentName) found = ind;
+      for (const sec of root.children) {
+        if (sec.name === oldCurrentName) { found = sec; break; }
+        for (const ind of sec.children) if (ind.name === oldCurrentName) { found = ind; break; }
+        if (found) break;
+      }
       current = found || root;
     } else {
       current = root;
@@ -1366,8 +1639,10 @@ function isTradingTime() {
 function buildCodeIndex() {
   codeIndex = new Map();
   if (!root) return;
-  for (const ind of root.children) {
-    for (const st of ind.children) codeIndex.set(st.code, st);
+  for (const sec of root.children) {
+    for (const ind of sec.children) {
+      for (const st of ind.children) codeIndex.set(st.code, st);
+    }
   }
 }
 
@@ -1385,6 +1660,30 @@ function gNorm(v) {
   if (v === null || v === undefined || v === "-" || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+// v91：开盘状态——东财源用 f124 行情时间戳新鲜度（<15 分钟=开盘中）；TE 源无 f124 返回 null（显示「快照」）
+function gIsOpen(it) {
+  if (it.te) return null;
+  if (!it.time) return null;
+  return (Date.now() / 1000 - it.time) < 15 * 60;
+}
+function gOpenBadge(it) {
+  const o = gIsOpen(it);
+  if (o === null) return "<span style='color:#8a94a6;font-size:11px'>快照</span>";
+  return o ? "<span style='color:#3dd68c;font-size:11px'>● 开盘中</span>" : "<span style='color:#5c6678;font-size:11px'>○ 已收盘</span>";
+}
+function gRegionOpen(arr) {
+  // 国家维度：任一指数开盘中 → 开盘中；全部有数据且全收 → 已收盘；否则 null
+  let anyOpen = false, allClosed = true, hasData = false;
+  for (const it of arr) {
+    const o = gIsOpen(it);
+    if (o === null) continue;
+    hasData = true;
+    if (o) { anyOpen = true; allClosed = false; }
+  }
+  if (anyOpen) return true;
+  if (hasData && allClosed) return false;
+  return null;
 }
 function gRangeVal(it) {
   const field = RANGES.find(r => r.id === currentRange).field;
@@ -1449,10 +1748,12 @@ function globalOption() {
         const rows = arr.slice(0, 6).map(i => {
           const v = gRangeVal(i), c = gPctColor(v);
           return "<div style='margin:3px 0'><span style='color:" + c + "'>" + i.name + "</span> " +
-            "<b>" + gFmtPrice(i.price) + "</b> <span style='color:" + c + "'>" + gPctStr(v) + "</span></div>";
+            "<b>" + gFmtPrice(i.price) + "</b> <span style='color:" + c + "'>" + gPctStr(v) + "</span> " + gOpenBadge(i) + "</div>";
         }).join("");
         const more = arr.length > 6 ? "<div style='color:#8a94a6;margin-top:4px'>…共 " + arr.length + " 条，点击查看全部</div>" : "";
-        return "<div style='font-weight:700;margin-bottom:4px'>" + p.name + " · " + arr[0].country + "</div>" + rows + more;
+        const ro = gRegionOpen(arr);
+        const rBadge = ro === null ? "" : (ro ? " <span style='color:#3dd68c;font-size:11px'>● 开盘中</span>" : " <span style='color:#5c6678;font-size:11px'>○ 已收盘</span>");
+        return "<div style='font-weight:700;margin-bottom:4px'>" + p.name + " · " + arr[0].country + rBadge + "</div>" + rows + more;
       }
     },
     visualMap: {
@@ -1479,6 +1780,7 @@ function showCountryPanel(region, arr) {
       "<span class='g-price'>" + gFmtPrice(i.price) + "</span>" +
       "<span class='g-pct' style='color:" + c + "'>" + gPctStr(v) + "</span>" +
       "<span class='g-chg' style='color:" + c + "'>" + chg + "</span>" +
+      "<span class='g-open'>" + gOpenBadge(i) + "</span>" +
       "<span class='g-time'>" + gFmtTime(i.time) + "</span></div>";
   }).join("");
   document.getElementById("countryPanel").classList.remove("hidden");
@@ -1550,7 +1852,8 @@ async function fetchGlobalQuotes() {
     setGStatus("全球实时：数据未加载", "err");
     return;
   }
-  const secids = gItems.map(i => i.secid || ("100." + i.code)); // v84 A股指数用真实 secid（旧数据无 secid 回退 100.）
+  // v91：东财实时循环只请求有 secid 的条目；TE 中东源（te:1、无 secid）由 global.json 快照供数
+  const secids = gItems.filter(i => i.secid).map(i => i.secid); // v84 A股指数用真实 secid（旧数据无 secid 回退 100.）
   try {
     const url = QUOTE_URL + "?fltt=2&pn=1&pz=40&np=1&fields=f2,f3,f4,f12,f109,f160,f110,f24,f25,f124&secids=" + secids.join(",");
     const res = await fetch(url);
@@ -1900,9 +2203,11 @@ async function refreshQuotes() {
   if (!root) return;
   if (!codeIndex) buildCodeIndex();
   const secids = [];
-  for (const ind of root.children) {
-    for (const st of ind.children) {
-      secids.push(st.code.startsWith("6") ? "1." + st.code : "0." + st.code);
+  for (const sec of root.children) {
+    for (const ind of sec.children) {
+      for (const st of ind.children) {
+        secids.push(st.code.startsWith("6") ? "1." + st.code : "0." + st.code);
+      }
     }
   }
   const batches = [];
@@ -1935,9 +2240,12 @@ async function refreshQuotes() {
     return;
   }
   liveFailures = 0;
-  // 行业/大盘涨跌幅按最新个股重算（面积保持快照市值不变；6 个区间一并重算）
-  for (const ind of root.children) recalcNodePcts(ind, ind.children);
-  recalcNodePcts(root, root.children.reduce((a, ind) => a.concat(ind.children), []));
+  // 行业/大盘涨跌幅按最新个股重算（v90 三层：二级→一级→root；面积保持快照市值不变；6 个区间一并重算）
+  for (const sec of root.children) {
+    for (const ind of sec.children) recalcNodePcts(ind, ind.children);
+    recalcNodePcts(sec, sec.children.reduce((a, ind) => a.concat(ind.children), []));
+  }
+  recalcNodePcts(root, root.children.reduce((a, sec) => a.concat(sec.children.reduce((y, ind) => y.concat(ind.children), [])), []));
   relayout();
   draw();
   updateLiveState();
@@ -2087,9 +2395,18 @@ const ttEl = document.getElementById("tooltip");
 if (ttEl) ttEl.addEventListener("click", e => {
   const db = e.target.closest("#ttDrillBtn");
   if (db) {
-    // 下钻按钮：按行业名找到板块节点，收起浮层并进入成分股页
+    // 下钻按钮：按行业名找板块节点（v90 三层树：root.children=一级，二级在其 children 里，两层搜索）
     const nm = db.getAttribute("data-name");
-    const ind = root && root.children ? root.children.find(x => x.name === nm) : null;
+    let ind = null;
+    if (root && root.children) {
+      ind = root.children.find(x => x.name === nm) || null;
+      if (!ind) {
+        for (const sec of root.children) {
+          const hit = sec.children && sec.children.find(x => x.name === nm);
+          if (hit) { ind = hit; break; }
+        }
+      }
+    }
     if (!ind) return;
     tooltip.style.display = "none";
     tooltipLocked = false;
@@ -2299,7 +2616,16 @@ function costEditOpen(code) {
   const ceCode = document.getElementById("ceCode");
   if (ceCode) ceCode.textContent = code + (nm ? " " + nm : "");
   const ceCost = document.getElementById("ceCost");
-  if (ceCost) ceCost.value = c ? String(c.cost) : "";
+  if (ceCost) {
+    if (c) {
+      ceCost.value = String(c.cost);
+    } else {
+      // 未设置过成本价：默认填当前实时价（无价格则留空）
+      const cst = codeIndex ? codeIndex.get(code) : null;
+      const px = (cst && cst.price != null && isFinite(cst.price)) ? cst.price : null;
+      ceCost.value = px !== null ? px.toFixed(2) : "";
+    }
+  }
   const ceQty = document.getElementById("ceQty");
   if (ceQty) ceQty.value = (c && c.qty) ? String(c.qty) : "";
   if (costEditorEl) costEditorEl.classList.remove("hidden");
@@ -2700,6 +3026,7 @@ function sizeCanvas() {
   if (w <= 0 || hh <= 0) return;
   W = w;
   H = hh;
+  WORLD_W = (H > W * 1.05) ? (W / H) : 1;   // 竖屏（明显高>宽）：世界宽=W/H<1 → 宽满屏；横屏保持 1x1
   dpr = window.devicePixelRatio || 1;
   cv.width = W * dpr;
   cv.height = H * dpr;
@@ -2710,7 +3037,7 @@ function sizeCanvas() {
 
 function init() {
   sizeCanvas();
-  baseScale = Math.min(W, H) * 0.98;
+  baseScale = (WORLD_W < 1 ? H : Math.min(W, H)) * 0.98;   // 竖屏：世界高 1 → scale=H；横屏不变
   resetView();
   fetchData(false);
   autoTimer = setInterval(() => fetchData(false), AUTO_REFRESH_MS);

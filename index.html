@@ -252,6 +252,7 @@
 .cal-detail .row { margin-bottom: 4px; }
 .cal-empty { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; background: var(--panel); border: 1px dashed var(--border); border-radius: 10px; }
 @media (max-width: 768px) {
+  #tip { display: none; }   /* 触屏无滚轮/右键，提示不适用 */
   #calView { padding: 10px 10px 30px; }
   .cal-ev { grid-template-columns: 46px 34px 34px 1fr 64px; grid-template-areas: "t imp cc ttl badge" "vals vals vals vals vals"; row-gap: 3px; }
   .cal-ev .t { grid-area: t; }
@@ -522,7 +523,7 @@
 <nav id="crumb"></nav>
 <div id="wrap">
   <canvas id="cv"></canvas>
-  <div id="tip">滚轮缩放 · 拖拽平移 · 单击下钻 · 双击返回/雪球 · 悬停看详情 · 右键个股加自选</div>
+  <div id="tip">滚轮缩放 · 拖拽平移 · 单击详情 · 双击下钻/雪球 · 悬停跟随 · 右键加自选</div>
   <div id="tooltip"></div>
 </div>
   <div id="wlPanel" class="hidden">
@@ -702,6 +703,6 @@
     <button class="wm-item wm-cancel" data-act="close">取消</button>
   </div>
 </div>
-<script src="app.js?v=82"></script>
+<script src="app.js?v=99"></script>
 </body>
 </html>

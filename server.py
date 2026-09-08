@@ -1617,6 +1617,78 @@ def _refetch_if_needed_lunch():
     else:
         print("[午休快照] 已有抓取任务进行中，跳过", flush=True)
 
+# ========== TE 中东指数 30 分钟轮询（方案A：独立轻线程，只更新 global.json 的 te 条目） ==========
+GLOBAL_JSON = os.path.join(BASE, "global.json")
+TE_LOOP_S = 30 * 60          # 30 分钟
+_TE_LOCK = threading.Lock()  # TE 写互斥（防双线程同时写 global.json）
+
+def _te_refresh_once():
+    """抓一次 TE 并更新 global.json 的 te 条目（失败保留旧值）。返回 (ok, n_updated, msg)"""
+    if not _TE_LOCK.acquire(blocking=False):
+        return (False, 0, "上一轮 TE 未结束，跳过")
+    try:
+        try:
+            if BASE not in sys.path:
+                sys.path.insert(0, BASE)
+            import fetch_data as _fd
+        except Exception as e:
+            return (False, 0, "import fetch_data 失败: %s" % e)
+        try:
+            te = _fd.fetch_te_mideast()
+        except Exception as e:
+            return (False, 0, "TE 抓取异常: %s" % e)
+        if not te:
+            return (False, 0, "TE 抓取为空（保留旧值）")
+        try:
+            with open(GLOBAL_JSON, "r", encoding="utf-8") as f:
+                g = json.load(f)
+        except Exception as e:
+            return (False, 0, "读 global.json 失败: %s" % e)
+        items = g.get("items") or []
+        n = 0
+        for it in items:
+            if not it.get("te"):
+                continue
+            # code 形如 "TE:TASI" → 匹配 TE 页指数名
+            name = str(it.get("code", ""))[3:]
+            x = te.get(name)
+            if not x:
+                continue
+            ch = False
+            for k in ("price", "pct", "pctYTD"):
+                if x.get(k) is not None and it.get(k) != x[k]:
+                    it[k] = x[k]
+                    ch = True
+            if ch:
+                n += 1
+        if n:
+            g["fetched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            tmp = GLOBAL_JSON + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(g, f, ensure_ascii=False)
+            os.replace(tmp, GLOBAL_JSON)
+        return (True, n, "更新 %d 条" % n)
+    finally:
+        _TE_LOCK.release()
+
+def _te_loop():
+    # 启动先等 30s（避开服务启动高峰与全量抓取竞态）
+    time.sleep(30)
+    fails = 0
+    while True:
+        try:
+            # 与全量抓取互斥：全量抓取中（900s 级）跳过本轮，避免同时写 global.json
+            if _refetch_lock.acquire(blocking=False):
+                _refetch_lock.release()
+                ok, n, msg = _te_refresh_once()
+                fails = 0 if ok else (fails + 1)
+                print("[TE轮询] %s" % msg, flush=True)
+            else:
+                print("[TE轮询] 全量抓取进行中，本轮跳过", flush=True)
+        except Exception as e:
+            print("[TE轮询] 异常: %s" % e, flush=True)
+        time.sleep(TE_LOOP_S)
+
 def alert_loop():
     while True:
         try:
@@ -1634,6 +1706,7 @@ if __name__ == "__main__":
     threading.Thread(target=_calendar_loop, daemon=True).start()
     threading.Thread(target=_irm_loop, daemon=True).start()
     threading.Thread(target=_irm_sse_loop, daemon=True).start()
+    threading.Thread(target=_te_loop, daemon=True).start()
     print("A股云图服务: http://127.0.0.1:%d/  (现货更新 /api/update | 手动重抓 /api/refetch | 备注读写 /api/notes | 告警 /api/alerts)" % port)
     try:
         srv.serve_forever()

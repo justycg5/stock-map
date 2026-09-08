@@ -1,3 +1,6 @@
+import urllib.request
+import re
+import ssl
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -197,6 +200,70 @@ GLOBAL_INDICES = [
 ]
 GLOBAL_FIELDS = "f2,f3,f4,f12,f14,f109,f160,f110,f24,f25,f124"
 
+# ---------- 中东指数（tradingeconomics.com/stocks，无鉴权静态 HTML；直连可用） ----------
+# (TE页指数名, 中文名, 国家中文名, 世界地图region名, ECharts地图国家名)
+TE_MIDEAST = [
+    ("TASI", "沙特TASI", "沙特", "Saudi Arabia", "Saudi Arabia"),
+    ("ADX General", "阿布扎比ADX", "阿联酋", "United Arab Emirates", "United Arab Emirates"),
+    ("DFM General", "迪拜DFM", "阿联酋", "United Arab Emirates", "United Arab Emirates"),
+    ("BIST 100", "土耳其BIST100", "土耳其", "Turkey", "Turkey"),
+    ("TA-125", "以色列TA125", "以色列", "Israel", "Israel"),
+    ("QE", "卡塔尔QE", "卡塔尔", "Qatar", "Qatar"),
+    ("MSM 30", "阿曼MSM30", "阿曼", "Oman", "Oman"),
+    ("ASE", "约旦ASE", "约旦", "Jordan", "Jordan"),
+    ("Kuwait All Share", "科威特全指", "科威特", "Kuwait", "Kuwait"),
+    ("Estirad", "巴林全指", "巴林", "Bahrain", "Bahrain"),
+    ("EGX 30", "埃及EGX30", "埃及", "Egypt", "Egypt"),
+    ("CFG 25", "摩洛哥CFG25", "摩洛哥", "Morocco", "Morocco"),
+]
+TE_STOCKS_URL = "https://tradingeconomics.com/stocks"
+TE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def _te_num(s):
+    try:
+        return float(str(s).replace(",", "").replace("%", "").replace("+", ""))
+    except Exception:
+        return None
+
+def fetch_te_mideast():
+    """tradingeconomics /stocks 主表格 → 中东指数行情 dict{指数名: {price,pct,pctYTD}}（显式直连）"""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(TE_STOCKS_URL, headers=TE_HEADERS)
+            r = opener.open(req, timeout=35)
+            body = r.read().decode("utf-8", "replace")
+            rows = re.findall(r"<tr[^>]*>(.*?)</tr>", body, re.S)
+            out = {}
+            for row in rows:
+                if not re.search(r"flag flag-[a-z]{2}", row):
+                    continue
+                cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+                texts = []
+                for c in cells:
+                    t = re.sub(r"<[^>]+>", "", c)
+                    t = re.sub(r"\s+", " ", t).strip()
+                    texts.append(t)
+                # 行结构：[空, 指数名, 价格, 涨跌额, 日%, 1日%, 1周%, 1月%, YTD%, 日期, 空]
+                if len(texts) >= 9 and texts[1]:
+                    out[texts[1]] = {
+                        "price": _te_num(texts[2]),
+                        "pct": _te_num(texts[4]) if "%" in texts[4] else None,
+                        "pctYTD": _te_num(texts[8]) if "%" in texts[8] else None,
+                    }
+            if out:
+                return out
+        except Exception as e:
+            print(f"TE 抓取第 {attempt+1} 次失败: {e}")
+            time.sleep(3 * (attempt + 1))
+    return {}
+
 # 期货主力连续合约（东财公开接口，无鉴权；secid = 市场前缀.品种代码m）
 # 市场前缀：113 上期所 / 114 大商所 / 115 郑商所 / 142 上海能源 / 112 国际 / 225 广期所
 FUTURES_FIELDS = "f2,f3,f4,f12,f14,f124"
@@ -281,6 +348,24 @@ def fetch_global():
             "pct20": norm(x.get("f110")), "pct60": norm(x.get("f24")), "pctYTD": norm(x.get("f25")),
             "time": x.get("f124"),
         })
+    # ---- 中东指数（TE 源）合并：te:1 标记、无 secid，前端东财实时循环自动跳过 ----
+    try:
+        te = fetch_te_mideast()
+        for idx_name, cn, country_cn, region, _mapname in TE_MIDEAST:
+            x = te.get(idx_name)
+            items.append({
+                "code": "TE:" + idx_name, "name": cn, "country": country_cn, "region": region,
+                "secid": None, "te": 1,
+                "price": x["price"] if x else None,
+                "pct": x["pct"] if x else None,
+                "chg": None,
+                "pct5": None, "pct10": None, "pct20": None, "pct60": None,
+                "pctYTD": x["pctYTD"] if x else None,
+                "time": None,
+            })
+        print(f"中东指数（TE）合并：{sum(1 for it in items if it.get('te'))} 条")
+    except Exception as e:
+        print(f"中东指数合并失败（跳过）: {e}")
     payload = {"fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"), "items": items}
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
     tmp = out + ".tmp"
@@ -522,7 +607,17 @@ def main():
             print(f"[{label}] 完成，共 {got} 只")
         time.sleep(1.0)
 
-    # 行业分组（按总市值降序）
+    # 行业分组（v88：申万一级 31 个，indmap.json 静态映射 code→一级；个股 industry 字段保留二级用于悬浮）
+    indmap_cfg = {}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "indmap.json"), encoding="utf-8") as f_map:
+            indmap_cfg = json.load(f_map) or {}
+    except Exception as e:
+        print("[一级分组] indmap.json 加载失败，退回二级行业: %s" % str(e)[:60], flush=True)
+    l1_map = {str(k): v for k, v in (indmap_cfg.get("map") or {}).items()}
+    code_l1 = {str(k): v for k, v in (indmap_cfg.get("code_map") or {}).items()}
+    for s in all_stocks:
+        s["_l1"] = code_l1.get(str(s["code"])) or l1_map.get(s["industry"]) or "综合"
     industries = {}
     for s in all_stocks:
         industries.setdefault(s["industry"], []).append(s)
@@ -532,12 +627,62 @@ def main():
     unmatched = 0
     for name, stocks in industries.items():
         total_mcap = sum(s["mcap"] for s in stocks if s["mcap"])
-        result.append({"name": name, "total_mcap": total_mcap, "pe": pe_map.get(name), "stocks": stocks})
-        if name not in pe_map:
+        pe = pe_map.get(name)
+        if pe is None and indmap_cfg.get("map"):
+            # 一级行业 PE：按成分股二级 pe_map 市值加权推导
+            num = den = 0.0
+            sec_mcap = {}
+            for s in stocks:
+                if s["mcap"] and pe_map.get(s["industry"]) is not None:
+                    sec_mcap[s["industry"]] = sec_mcap.get(s["industry"], 0) + s["mcap"]
+            for sec, mc in sec_mcap.items():
+                p2 = pe_map.get(sec)
+                if p2:
+                    num += p2 * mc
+                    den += mc
+            pe = (num / den) if den else None
+        result.append({"name": name, "total_mcap": total_mcap, "pe": pe, "stocks": stocks})
+        if pe is None:
             unmatched += 1
     if unmatched and not quiet:
         print("[行业PE] %d 个行业未匹配到板块市盈率（留空）" % unmatched, flush=True)
     result.sort(key=lambda x: -x["total_mcap"])
+
+    # v89.1：申万一级聚合层（sectors）——industries 保持二级；sectors 按 _l1 多数归属把二级分组
+    sec_bucket = {}
+    for ind in result:
+        votes = {}
+        for s in ind["stocks"]:
+            l1 = s.get("_l1") or "综合"
+            votes[l1] = votes.get(l1, 0) + 1
+        l1 = max(votes.items(), key=lambda kv: kv[1])[0] if votes else "综合"
+        sec_bucket.setdefault(l1, []).append(ind)
+    sectors = []
+    for l1, children in sec_bucket.items():
+        tm = sum(c["total_mcap"] for c in children)
+        all_st = [s for c in children for s in c["stocks"]]
+        def wp(f, _st=all_st):
+            num = den = 0.0
+            for s in _st:
+                v = s.get(f)
+                mc = s.get("mcap")
+                if v is not None and mc:
+                    num += v * mc
+                    den += mc
+            return (num / den) if den else None
+        num = den = 0.0
+        for c in children:
+            if c.get("pe"):
+                num += c["pe"] * c["total_mcap"]
+                den += c["total_mcap"]
+        sectors.append({
+            "name": l1, "total_mcap": tm,
+            "pe": (num / den) if den else None,
+            "pct": wp("pct"), "pct5": wp("pct5"), "pct10": wp("pct10"),
+            "pct20": wp("pct20"), "pct60": wp("pct60"), "pctYTD": wp("pctYTD"),
+            "children": sorted(children, key=lambda x: -x["total_mcap"]),
+        })
+    sectors.sort(key=lambda x: -x["total_mcap"])
 
     payload = {
         "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -545,6 +690,7 @@ def main():
         "total_stocks": len(all_stocks),
         "total_industries": len(result),
         "industries": result,
+        "sectors": sectors,
     }
     out = data_path()
     # 保留现货模块 q5500 节点（v33b：全量抓取不应抹掉现货数据），临界区加锁
