@@ -64,7 +64,7 @@ HEADERS = {
     "Referer": "https://quote.eastmoney.com/",
 }
 # f12 代码 / f14 名称 / f2 现价 / f3 涨跌幅 / f4 涨跌额 / f6 成交额(元) / f20 总市值(元) / f100 行业
-FIELDS = "f12,f14,f2,f3,f4,f6,f20,f100,f109,f160,f110,f24,f25"
+FIELDS = "f12,f14,f2,f3,f4,f6,f20,f100,f109,f160,f110,f24,f25,f115,f45,f46,f40,f41"
 MARKETS = [
     ("沪主板", "m:1+t:2"),
     ("深主板", "m:0+t:6"),
@@ -591,6 +591,11 @@ def main():
                         "chg": norm(x.get("f4")),
                         "amount": norm(x.get("f6")),
                         "mcap": norm(x.get("f20")),
+                        "peTTM": norm(x.get("f115")),
+                        "rev": norm(x.get("f40")),      # 营业总收入（累计，元）——f40 语义实测校准
+                        "revYoy": norm(x.get("f41")),   # 营收同比 %
+                        "np": norm(x.get("f45")),       # 归母净利润（累计，元）
+                        "npYoy": norm(x.get("f46")),    # 归母同比 %
                         "pct5": norm(x.get("f109")),
                         "pct10": norm(x.get("f160")),
                         "pct20": norm(x.get("f110")),

@@ -154,6 +154,7 @@ function buildTree(payload) {
       value: st.mcap && st.mcap > 0 ? st.mcap : 0.1,
       price: st.price, pct: st.pct, chg: st.chg,
       amount: st.amount, mcap: st.mcap,
+      peTTM: st.peTTM, rev: st.rev, revYoy: st.revYoy, np: st.np, npYoy: st.npYoy,
       pct5: st.pct5, pct10: st.pct10, pct20: st.pct20, pct60: st.pct60, pctYTD: st.pctYTD,
       leaf: true, parent: null,
     });
@@ -205,6 +206,7 @@ function buildTree(payload) {
       value: st.mcap && st.mcap > 0 ? st.mcap : 0.1,
       price: st.price, pct: st.pct, chg: st.chg,
       amount: st.amount, mcap: st.mcap,
+      peTTM: st.peTTM, rev: st.rev, revYoy: st.revYoy, np: st.np, npYoy: st.npYoy,
       pct5: st.pct5, pct10: st.pct10, pct20: st.pct20, pct60: st.pct60, pctYTD: st.pctYTD,
       leaf: true, parent: null,
     }));
@@ -1305,6 +1307,36 @@ window.addEventListener("resize", () => {
 });
 
 // ---------- Tooltip ----------
+// v92 悬停 F10 财务异步填充：/api/f10?code=（server 端按需缓存），同 code 复用；失败静默保留「—」
+let _f10Cache = {};
+let _f10ReqSeq = 0;
+function fetchF10ForTip(code) {
+  if (!code) return;
+  const seq = ++_f10ReqSeq;
+  const render = d => {
+    if (seq !== _f10ReqSeq) return;   // 只渲染最新一次悬停
+    const dnp = (d && d.deductNp != null) ? fmtYi(d.deductNp) : "—";
+    const dny = (d && d.deductNpYoy != null) ? ((d.deductNpYoy > 0 ? "+" : "") + d.deductNpYoy.toFixed(2) + "%") : "—";
+    const oc = (d && d.opCash != null) ? fmtYi(d.opCash) : "—";
+    const sr = (d && d.speedRatio != null) ? d.speedRatio.toFixed(2) : "—";
+    const dnyColor = (d && d.deductNpYoy != null) ? pctTextColor(d.deductNpYoy) : "#8b95a7";
+    const el1 = document.querySelector('.tt-f10row[data-code="' + code + '"] .tt-f10v');
+    const el2 = document.querySelector('.tt-f10row2[data-code="' + code + '"] .tt-f10v2');
+    const el3 = document.querySelector('.tt-f10row3[data-code="' + code + '"] .tt-f10v3');
+    const el4 = document.querySelector('.tt-f10row4[data-code="' + code + '"] .tt-f10v4');
+    if (el1) el1.textContent = dnp;
+    if (el2) { el2.textContent = dny; el2.style.color = dnyColor; }
+    if (el3) el3.textContent = oc;
+    if (el4) el4.textContent = sr;
+  };
+  if (_f10Cache[code]) { render(_f10Cache[code]); return; }
+  fetch("/api/f10?code=" + code).then(r => r.json()).then(j => {
+    const d = (j && j.ok) ? j.data : null;
+    if (d && !d.error) _f10Cache[code] = d;
+    render(d);
+  }).catch(() => {});
+}
+
 function updateTooltip(node, mx, my) {
   if (!node) { tooltip.style.display = "none"; tooltipLocked = false; return; }
   const ind = node.leaf ? node.parent : null;
@@ -1322,10 +1354,21 @@ function updateTooltip(node, mx, my) {
     html += '<div class="tt-row"><span class="tt-label">现价</span><span>' + fmtNum(price) + "</span></div>";
     html += '<div class="tt-row"><span class="tt-label">' + rl + '涨跌幅</span><span style="color:' + pctTextColor(rp) + ';font-weight:600">' + rpStr + "</span></div>";
     if (currentRange !== "day") html += '<div class="tt-row"><span class="tt-label">当日涨跌幅</span><span style="color:' + pctTextColor(pc) + '">' + pctStr + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">涨跌额</span><span>' + chgStr + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">成交额</span><span>' + fmtYi(node.amount) + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">总市值</span><span>' + fmtYi(node.mcap) + "</span></div>";
+    const fmtYi2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : fmtYi(v);
+    const fs1 = node.peTTM;
+    html += '<div class="tt-row"><span class="tt-label">市盈率TTM</span><span>' + (fs1 === null || fs1 === undefined || isNaN(fs1) ? "—" : fs1.toFixed(2)) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">总营收</span><span>' + fmtYi2(node.rev) + "</span></div>";
+    const ry = node.revYoy;
+    html += '<div class="tt-row"><span class="tt-label">总营收同比</span><span style="color:' + pctTextColor(ry) + '">' + (ry === null || ry === undefined || isNaN(ry) ? "—" : ((ry > 0 ? "+" : "") + ry.toFixed(2) + "%")) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">归母净利润</span><span>' + fmtYi2(node.np) + "</span></div>";
+    const ny = node.npYoy;
+    html += '<div class="tt-row"><span class="tt-label">归母净利润同比</span><span style="color:' + pctTextColor(ny) + '">' + (ny === null || ny === undefined || isNaN(ny) ? "—" : ((ny > 0 ? "+" : "") + ny.toFixed(2) + "%")) + "</span></div>";
+    html += '<div class="tt-row tt-f10row" data-code="' + node.code + '"><span class="tt-label">扣非净利润</span><span class="tt-f10v">…</span></div>';
+    html += '<div class="tt-row tt-f10row2" data-code="' + node.code + '"><span class="tt-label">扣非同比</span><span class="tt-f10v2">…</span></div>';
+    html += '<div class="tt-row tt-f10row3" data-code="' + node.code + '"><span class="tt-label">经营现金流</span><span class="tt-f10v3">…</span></div>';
+    html += '<div class="tt-row tt-f10row4" data-code="' + node.code + '"><span class="tt-label">速动比率</span><span class="tt-f10v4">…</span></div>';
     if (ind) html += '<div class="tt-ind">行业：' + ind.name + "</div>";
+    fetchF10ForTip(node.code);
     const note = noteGet(node.code);
     if (note) {
       html += '<div class="tt-note has" data-code="' + node.code + '"><div class="tt-note-text">' + esc(note) + '</div><div class="tt-note-ops"><span class="tt-note-edit">编辑</span><span class="tt-note-del">删除</span></div></div>';

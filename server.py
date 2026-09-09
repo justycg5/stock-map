@@ -207,6 +207,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_monitorcfg_get()
         if path == "/api/rare_earth_refetch":
             return self._handle_rare_earth_refetch()
+        if path == "/api/f10":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code = (qs.get("code") or [""])[0]
+            data = _f10_get(code)
+            if data is None:
+                return self._json({"ok": False, "msg": "f10 unavailable"}, 200)
+            return self._json({"ok": True, "data": data})
         return super().do_GET()
 
     def do_POST(self):
@@ -1617,6 +1624,88 @@ def _refetch_if_needed_lunch():
     else:
         print("[午休快照] 已有抓取任务进行中，跳过", flush=True)
 
+# ========== F10 财务指标（悬停详情用）：datacenter 按需缓存 + 每日失效 ==========
+F10_JSON = os.path.join(BASE, "f10.json")
+F10_TTL_S = 24 * 3600
+_F10_LOCK = threading.Lock()
+_F10_MEMORY = {}   # code -> {"data": {...}, "ts": epoch}（内存级热缓存，落盘 f10.json）
+
+def _f10_fetch(secucode):
+    """东财 datacenter F10 主财务指标（最新报告期一行）。secucode 形如 600928.SH"""
+    import ssl as _ssl
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    url = ('https://datacenter.eastmoney.com/securities/api/data/v1/get?'
+           'reportName=RPT_F10_FINANCE_MAINFINADATA&columns=ALL'
+           '&quoteColumns=&filter=(SECUCODE%3D%22' + urllib.parse.quote(secucode) + '%22)'
+           '&pageNumber=1&pageSize=1&sortTypes=-1&sortColumns=REPORT_DATE&source=HSF10&client=PC')
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0 Safari/537.36",
+        "Referer": "https://emweb.securities.eastmoney.com/"})
+    j = json.loads(op.open(req, timeout=12).read().decode("utf-8"))
+    rows = (j.get("result") or {}).get("data") or []
+    if not rows:
+        return None
+    r0 = rows[0]
+    def _n(x):
+        try:
+            v = float(x)
+            return v
+        except Exception:
+            return None
+    return {
+        "reportDate": str(r0.get("REPORT_DATE") or "")[:10],
+        "deductNp": _n(r0.get("KCFJCXSYJLR")),
+        "deductNpYoy": _n(r0.get("KCFJCXSYJLRTZ")),
+        "opCash": _n(r0.get("NETCASH_OPERATE_PK")),
+        "speedRatio": _n(r0.get("GUARD_SPEED_RATIO")),
+    }
+
+def _f10_get(code):
+    """code 6 位 → 查缓存（内存/磁盘），过期则拉 F10。失败返回 None。"""
+    if not re.match(r"^\d{6}$", code or ""):
+        return None
+    secucode = code + ("." + ("SH" if code.startswith(("6", "9")) else "SZ"))
+    now = time.time()
+    ent = _F10_MEMORY.get(code)
+    if ent and now - ent["ts"] < F10_TTL_S:
+        return ent["data"]
+    try:
+        disk = _load_json(F10_JSON, {}) or {}
+        ent = disk.get(code)
+        if ent and now - ent.get("ts", 0) < F10_TTL_S:
+            _F10_MEMORY[code] = ent
+            return ent.get("data")
+    except Exception:
+        pass
+    if not _F10_LOCK.acquire(blocking=False):
+        return _F10_MEMORY.get(code, {}).get("data")
+    try:
+        data = _f10_fetch(secucode)
+        if data is None:
+            data = {"error": "no data"}
+        # 错误结果内存缓存 5 分钟（过期后重试），不落盘；成功结果缓存 24h 并落盘
+        if data.get("error"):
+            _F10_MEMORY[code] = {"ts": now - F10_TTL_S + 300, "data": data}
+        else:
+            _F10_MEMORY[code] = {"ts": now, "data": data}
+            try:
+                disk = _load_json(F10_JSON, {}) or {}
+                disk[code] = {"ts": now, "data": data}
+                if len(disk) > 3000:
+                    items = sorted(disk.items(), key=lambda kv: kv[1].get("ts", 0))[-2000:]
+                    disk = dict(items)
+                _save_json(F10_JSON, disk)
+            except Exception:
+                pass
+        return data
+    except Exception as e:
+        print("[F10] %s 抓取失败: %s" % (code, str(e)[:60]), flush=True)
+        return None
+    finally:
+        _F10_LOCK.release()
 # ========== TE 中东指数 30 分钟轮询（方案A：独立轻线程，只更新 global.json 的 te 条目） ==========
 GLOBAL_JSON = os.path.join(BASE, "global.json")
 TE_LOOP_S = 30 * 60          # 30 分钟
