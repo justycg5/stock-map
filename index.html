@@ -82,7 +82,9 @@
     border-radius: 8px; padding: 10px 12px; font-size: 13px; min-width: 190px;
     box-shadow: 0 8px 24px rgba(0,0,0,.5);
   }
-  #tooltip .tt-name { font-weight: 700; font-size: 14px; }
+  #tooltip .tt-name { font-weight: 700; font-size: 14px; padding-right: 24px; }
+  #tooltip .tt-close { position: absolute; top: 2px; right: 4px; font-size: 15px; line-height: 1; color: var(--muted); cursor: pointer; padding: 3px 6px; user-select: none; }
+  #tooltip .tt-close:hover { color: var(--text); }
   #tooltip .tt-code { color: var(--muted); font-size: 12px; margin-left: 6px; }
   #tooltip .tt-row { display: flex; justify-content: space-between; gap: 18px; margin-top: 5px; }
   #tooltip .tt-label { color: var(--muted); }
@@ -703,6 +705,6 @@
     <button class="wm-item wm-cancel" data-act="close">取消</button>
   </div>
 </div>
-<script src="app.js?v=107"></script>
+<script src="app.js?v=111"></script>
 </body>
 </html>

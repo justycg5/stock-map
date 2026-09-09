@@ -243,7 +243,13 @@ function buildTree(payload) {
 
 // ---------- 视图控制 ----------
 function resetView() {
-  // v92：竖屏且内容超长（WORLD_H>1）时，以宽满屏为准（scale=W/WORLD_W），高度允许拖拽浏览
+  // v94 移动端（竖屏）：宽满屏（云图宽度=屏幕宽度）、顶部对齐菜单栏下缘；下方超出屏幕的部分拖拽/双击浏览
+  if (WORLD_W < 1) {
+    scale = W / WORLD_W;
+    offsetX = 0;
+    offsetY = 0;
+    return;
+  }
   const fitW = W / WORLD_W;
   const fitH = H / WORLD_H;
   scale = Math.min(baseScale, fitW, fitH === Infinity ? baseScale : fitH);
@@ -822,7 +828,7 @@ cv.addEventListener("pointerup", e => {
         drillInto(node);
       } else {
         lastTapName = node.name; lastTapTime = now;
-        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; // v84 tap 行业显示并锁定浮层，点浮层内「下钻」按钮才进入成分股
+        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top, e.pointerType === "touch"); tooltipLocked = true; // v84 tap 行业显示并锁定浮层，点浮层内「下钻」按钮才进入成分股
       }
     }
     else if (node && node.leaf) {
@@ -833,7 +839,7 @@ cv.addEventListener("pointerup", e => {
         window.open("https://xueqiu.com/S/" + xueqiuSymbol(node.code), "_blank");
       } else {
         lastTapName = node.code; lastTapTime = now2;
-        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top); tooltipLocked = true; // v74 tap 股票显示并锁定浮层
+        hover = node; draw(); updateTooltip(node, e.clientX - rect.left, e.clientY - rect.top, e.pointerType === "touch"); tooltipLocked = true; // v74 tap 股票显示并锁定浮层；v94 触屏居中显示
       }
     }
     else {
@@ -911,7 +917,7 @@ async function fetchNotesFile() {
   wlNotes = data.notes;
   try { localStorage.setItem(NOTES_KEY, JSON.stringify(wlNotes)); } catch (e) {}
   draw();
-  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my);
+  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my, lastTip.centered);
   if (wlPanelOpen) renderWatchlist();
 }
 function wlNotesSave() {
@@ -1323,11 +1329,14 @@ function fetchF10ForTip(code) {
     const dny = (d && d.deductNpYoy != null) ? ((d.deductNpYoy > 0 ? "+" : "") + d.deductNpYoy.toFixed(2) + "%") : "—";
     const oc = (d && d.opCash != null) ? fmtYi(d.opCash) : "—";
     const sr = (d && d.speedRatio != null) ? d.speedRatio.toFixed(2) : "—";
+    const rd = (d && d.reportDate) ? d.reportDate : "—";
     const dnyColor = (d && d.deductNpYoy != null) ? pctTextColor(d.deductNpYoy) : "#8b95a7";
+    const el0 = document.querySelector('.tt-f10row0[data-code="' + code + '"] .tt-f10v0');
     const el1 = document.querySelector('.tt-f10row[data-code="' + code + '"] .tt-f10v');
     const el2 = document.querySelector('.tt-f10row2[data-code="' + code + '"] .tt-f10v2');
     const el3 = document.querySelector('.tt-f10row3[data-code="' + code + '"] .tt-f10v3');
     const el4 = document.querySelector('.tt-f10row4[data-code="' + code + '"] .tt-f10v4');
+    if (el0) el0.textContent = rd;
     if (el1) el1.textContent = dnp;
     if (el2) { el2.textContent = dny; el2.style.color = dnyColor; }
     if (el3) el3.textContent = oc;
@@ -1351,19 +1360,21 @@ function fetchF10ForTip(code) {
   });
 }
 
-function updateTooltip(node, mx, my) {
+function updateTooltip(node, mx, my, centered) {
   if (!node) { tooltip.style.display = "none"; tooltipLocked = false; return; }
   const ind = node.leaf ? node.parent : null;
   const esc = s0 => String(s0).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   let html = '<div class="tt-name">' + node.name;
   if (node.code) html += '<span class="tt-code">' + node.code + "</span>";
   html += "</div>";
+  html += '<span class="tt-close" title="关闭">×</span>';
   if (node.leaf) {
     const price = node.price;
     // v94 涨跌幅不再入悬浮窗：格子上画的 rangePctOf(node) 与之完全相同，纯重复
     html += '<div class="tt-row"><span class="tt-label">现价</span><span>' + fmtNum(price) + "</span></div>";
     const fmtYi2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : fmtYi(v);
     const fs1 = node.peTTM;
+    html += '<div class="tt-row tt-f10row0" data-code="' + node.code + '"><span class="tt-label">报告期</span><span class="tt-f10v0">…</span></div>';
     html += '<div class="tt-row"><span class="tt-label">市盈率TTM</span><span>' + (fs1 === null || fs1 === undefined || isNaN(fs1) ? "—" : fs1.toFixed(2)) + "</span></div>";
     html += '<div class="tt-row"><span class="tt-label">总营收</span><span>' + fmtYi2(node.rev) + "</span></div>";
     const ry = node.revYoy;
@@ -1407,12 +1418,22 @@ function updateTooltip(node, mx, my) {
   fetchF10ForTip(node.code);
   tooltip.style.display = "block";
   const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
-  let tx = mx + 14, ty = my + 14;
-  if (tx + tw > W) tx = mx - tw - 12;
-  if (ty + th > H) ty = my - th - 12;
+  let tx, ty;
+  if (centered) {
+    // v94 移动端 tap：视口居中显示——tap 点即手指位置，锚点定位会被手指遮挡，小屏上翻转后还会越界
+    tx = (W - tw) / 2;
+    ty = (H - th) / 2;
+  } else {
+    tx = mx + 14; ty = my + 14;
+    if (tx + tw > W) tx = mx - tw - 12;
+    if (ty + th > H) ty = my - th - 12;
+  }
+  // 边界钳制：翻转后坐标可能为负（浮层顶部被裁出屏外），统一下限 8px；上限防超宽屏外溢
+  tx = Math.max(8, Math.min(tx, W - tw - 8));
+  ty = Math.max(8, Math.min(ty, H - th - 8));
   tooltip.style.left = tx + "px";
   tooltip.style.top = ty + "px";
-  lastTip = { node: node, mx: mx, my: my };
+  lastTip = { node: node, mx: mx, my: my, centered: !!centered };
 }
 
 // ---------- 搜索 ----------
@@ -1788,6 +1809,38 @@ function buildMapData() {
   }
   return data;
 }
+let gMapAspectCache = null;
+// v95 world.json 投影后宽高比：ECharts 默认 aspectScale=0.75，投影宽=经度跨度×0.75、高=纬度跨度
+function gMapAspect() {
+  if (gMapAspectCache) return gMapAspectCache;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const f of (gWorld && gWorld.features) || []) {
+    const g = f.geometry;
+    if (!g) continue;
+    const polys = g.type === "Polygon" ? [g.coordinates] : (g.type === "MultiPolygon" ? g.coordinates : []);
+    for (const poly of polys) for (const ring of poly) for (const p of ring) {
+      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+    }
+  }
+  gMapAspectCache = (maxX > minX && maxY > minY) ? (maxX - minX) * 0.75 / (maxY - minY) : 1.94;
+  return gMapAspectCache;
+}
+// v95 修复手机竖屏长宽比失真：原来用 top/bottom/left/right 让 ECharts 把地图各向异性拉伸铺满容器矩形，
+// 竖屏矩形瘦高时大陆被横向压扁约七成。改用 layoutCenter+layoutSize 等比缩放（contain）：
+// 容器相对更宽 → 按高度定尺寸，底部留 48px 给 visualMap（桌面观感不变）；
+// 容器相对更窄 → 按宽度定尺寸，竖屏整图完整可见，比例不再失真（可拖拽/双指缩放）
+function gMapLayout() {
+  if (!gChart) return { layoutCenter: ["50%", "50%"], layoutSize: "100%" };
+  const w = gChart.getWidth(), h = gChart.getHeight();
+  if (!w || !h) return { layoutCenter: ["50%", "50%"], layoutSize: "100%" };
+  const aspect = gMapAspect();
+  if (w / h >= aspect) {
+    const vh = Math.max(80, h - 48);
+    return { layoutCenter: [Math.round(w / 2), Math.round(vh / 2)], layoutSize: Math.round(vh * aspect) };
+  }
+  return { layoutCenter: [Math.round(w / 2), Math.round(h / 2)], layoutSize: Math.round(w) };
+}
 function globalOption() {
   const maxAbs = gMaxAbs();
   return {
@@ -1816,7 +1869,7 @@ function globalOption() {
       text: ["涨", "跌"], textStyle: { color: "#8a94a6" }
     },
     series: [{
-      type: "map", map: "world", roam: true, zoom: 1.12, top: 30, bottom: 60, left: 0, right: 0,
+      type: "map", map: "world", roam: true, zoom: 1.12, ...gMapLayout(),
       label: { show: false },
       emphasis: { label: { show: true, color: "#fff", fontSize: 13 }, itemStyle: { areaColor: "#3b6ea5" } },
       itemStyle: { areaColor: "#1e2530", borderColor: "#3b5077", borderWidth: 0.6 },
@@ -1876,7 +1929,7 @@ function renderGlobalMap() {
   const maxAbs = gMaxAbs();
   gChart.setOption({
     visualMap: { min: -maxAbs, max: maxAbs },
-    series: [{ data: buildMapData() }]
+    series: [Object.assign(gMapLayout(), { data: buildMapData() })]
   });
   if (gPanelOpen) {
     const sel = gCountryMap.get(lastPanelRegion);
@@ -2446,6 +2499,14 @@ autoRefreshEl.addEventListener("change", () => {
 // ---------- 自选股事件 ----------
 const ttEl = document.getElementById("tooltip");
 if (ttEl) ttEl.addEventListener("click", e => {
+  const xb = e.target.closest(".tt-close");
+  if (xb) {
+    // 关闭按钮：收起并清 lastTip，防止行情 8s 刷新/缩放重绘把已关闭的浮层复活
+    tooltip.style.display = "none";
+    tooltipLocked = false;
+    lastTip = null;
+    return;
+  }
   const db = e.target.closest("#ttDrillBtn");
   if (db) {
     // 下钻按钮：按行业名找板块节点（v90 三层树：root.children=一级，二级在其 children 里，两层搜索）
@@ -2482,7 +2543,7 @@ if (ttEl) ttEl.addEventListener("click", e => {
   if (nd) {
     const nc = nd.closest(".tt-note").getAttribute("data-code");
     delete wlNotes[nc]; wlNotesSave();
-    if (lastTip && lastTip.node && lastTip.node.code === nc) updateTooltip(lastTip.node, lastTip.mx, lastTip.my);
+    if (lastTip && lastTip.node && lastTip.node.code === nc) updateTooltip(lastTip.node, lastTip.mx, lastTip.my, lastTip.centered);
     draw(); showToast("备注已删除");
     return;
   }
@@ -2551,7 +2612,7 @@ document.getElementById("cpClose").addEventListener("click", () => {
   document.getElementById("countryPanel").classList.add("hidden");
   gPanelOpen = false;
 });
-window.addEventListener("resize", () => { if (gChart) gChart.resize(); });
+window.addEventListener("resize", () => { if (gChart) { gChart.resize(); renderGlobalMap(); } });
 
 // tooltip 锁定：鼠标移入浮层冻结位置，移出恢复跟随
 const tipLockEl = document.getElementById("tooltip");
@@ -2589,7 +2650,7 @@ function saveNote() {
   wlNotesSave();
   closeNoteEditor();
   draw();
-  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my);
+  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my, lastTip.centered);
   showToast(t ? "备注已保存" : "备注已删除");
 }
 const neSaveEl = document.getElementById("neSave");
@@ -2602,7 +2663,7 @@ if (neDelEl) neDelEl.addEventListener("click", () => {
   const c = noteEditingCode;
   delete wlNotes[c]; wlNotesSave();
   closeNoteEditor(); draw();
-  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my);
+  if (lastTip && lastTip.node) updateTooltip(lastTip.node, lastTip.mx, lastTip.my, lastTip.centered);
   showToast("备注已删除");
 });
 
