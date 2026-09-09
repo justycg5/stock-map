@@ -1359,15 +1359,9 @@ function updateTooltip(node, mx, my) {
   if (node.code) html += '<span class="tt-code">' + node.code + "</span>";
   html += "</div>";
   if (node.leaf) {
-    const pc = node.pct, chg = node.chg, price = node.price;
-    const rp = rangePctOf(node);
-    const rl = RANGES.find(r => r.id === currentRange).label;
-    const rpStr = rp === null ? "—" : ((rp > 0 ? "+" : "") + rp.toFixed(2) + "%");
-    const pctStr = pc === null || pc === undefined || isNaN(pc) ? "—" : ((pc > 0 ? "+" : "") + pc.toFixed(2) + "%");
-    const chgStr = chg === null || chg === undefined || isNaN(chg) ? "—" : ((chg > 0 ? "+" : "") + chg.toFixed(2));
+    const price = node.price;
+    // v94 涨跌幅不再入悬浮窗：格子上画的 rangePctOf(node) 与之完全相同，纯重复
     html += '<div class="tt-row"><span class="tt-label">现价</span><span>' + fmtNum(price) + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">' + rl + '涨跌幅</span><span style="color:' + pctTextColor(rp) + ';font-weight:600">' + rpStr + "</span></div>";
-    if (currentRange !== "day") html += '<div class="tt-row"><span class="tt-label">当日涨跌幅</span><span style="color:' + pctTextColor(pc) + '">' + pctStr + "</span></div>";
     const fmtYi2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : fmtYi(v);
     const fs1 = node.peTTM;
     html += '<div class="tt-row"><span class="tt-label">市盈率TTM</span><span>' + (fs1 === null || fs1 === undefined || isNaN(fs1) ? "—" : fs1.toFixed(2)) + "</span></div>";
