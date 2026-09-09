@@ -1680,9 +1680,14 @@ def _f10_get(code):
             return ent.get("data")
     except Exception:
         pass
-    if not _F10_LOCK.acquire(blocking=False):
+    # v93：同 code 并发（mousemove 高频触发）时等锁而不是立刻返回 None——
+    # 东财单次抓取超时 12s，这里最多等 13s；等到了先复查内存缓存（前一线程可能已抓完写入），避免重复抓取
+    if not _F10_LOCK.acquire(timeout=13):
         return _F10_MEMORY.get(code, {}).get("data")
     try:
+        ent = _F10_MEMORY.get(code)
+        if ent and time.time() - ent["ts"] < F10_TTL_S:
+            return ent["data"]
         data = _f10_fetch(secucode)
         if data is None:
             data = {"error": "no data"}

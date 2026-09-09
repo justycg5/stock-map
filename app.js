@@ -1307,8 +1307,12 @@ window.addEventListener("resize", () => {
 });
 
 // ---------- Tooltip ----------
-// v92 悬停 F10 财务异步填充：/api/f10?code=（server 端按需缓存），同 code 复用；失败静默保留「—」
+// v92 悬停 F10 财务异步填充：/api/f10?code=（server 端按需缓存），同 code 复用
+// v93 修复竞态：① 同 code 在途去重（mousemove 每次都触发，不再打出重复请求）；
+//     ② 失败（{ok:false}/网络错误）不把「—」固化，保留「…」，浮层仍指向该股时自动重试（最多 2 次）
 let _f10Cache = {};
+let _f10Pending = {};   // code -> 在途 Promise（去重）
+let _f10Retry = {};     // code -> 连续失败次数（成功后清零）
 let _f10ReqSeq = 0;
 function fetchF10ForTip(code) {
   if (!code) return;
@@ -1330,11 +1334,21 @@ function fetchF10ForTip(code) {
     if (el4) el4.textContent = sr;
   };
   if (_f10Cache[code]) { render(_f10Cache[code]); return; }
-  fetch("/api/f10?code=" + code).then(r => r.json()).then(j => {
-    const d = (j && j.ok) ? j.data : null;
-    if (d && !d.error) _f10Cache[code] = d;
-    render(d);
-  }).catch(() => {});
+  if (!_f10Pending[code]) {
+    _f10Pending[code] = fetch("/api/f10?code=" + code).then(r => r.json()).then(j => {
+      if (!j || !j.ok || !j.data) return null;   // 竞态/网络失败 → null，走重试
+      if (!j.data.error) { _f10Cache[code] = j.data; _f10Retry[code] = 0; }
+      return j.data;   // 带 error 的也返回：服务端确认无数据 → 渲染「—」（正确终态）
+    }).catch(() => null).finally(() => { delete _f10Pending[code]; });
+  }
+  _f10Pending[code].then(d => {
+    if (d) { render(d); return; }
+    if ((_f10Retry[code] || 0) >= 2) return;
+    _f10Retry[code] = (_f10Retry[code] || 0) + 1;
+    setTimeout(() => {
+      if (lastTip && lastTip.node && lastTip.node.code === code) fetchF10ForTip(code);
+    }, 800);
+  });
 }
 
 function updateTooltip(node, mx, my) {
@@ -1368,7 +1382,6 @@ function updateTooltip(node, mx, my) {
     html += '<div class="tt-row tt-f10row3" data-code="' + node.code + '"><span class="tt-label">经营现金流</span><span class="tt-f10v3">…</span></div>';
     html += '<div class="tt-row tt-f10row4" data-code="' + node.code + '"><span class="tt-label">速动比率</span><span class="tt-f10v4">…</span></div>';
     if (ind) html += '<div class="tt-ind">行业：' + ind.name + "</div>";
-    fetchF10ForTip(node.code);
     const note = noteGet(node.code);
     if (note) {
       html += '<div class="tt-note has" data-code="' + node.code + '"><div class="tt-note-text">' + esc(note) + '</div><div class="tt-note-ops"><span class="tt-note-edit">编辑</span><span class="tt-note-del">删除</span></div></div>';
@@ -1395,6 +1408,9 @@ function updateTooltip(node, mx, my) {
     html += '<div class="tt-row tt-wlrow"><button id="ttDrillBtn" data-name="' + node.name + '" class="wl-btn" title="进入该行业的成分股页面">↓ 下钻查看成分股</button></div>';
   }
   tooltip.innerHTML = html;
+  // v93.1 F10 填充必须在 innerHTML 赋值之后：缓存命中时 render 同步执行，
+  // 若在赋值前调用会填充旧 DOM 再被整体重写覆盖，导致第二次悬停起永远显示「…」
+  fetchF10ForTip(node.code);
   tooltip.style.display = "block";
   const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
   let tx = mx + 14, ty = my + 14;
