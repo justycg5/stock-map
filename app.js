@@ -1620,7 +1620,10 @@ async function fetchOnce(showStatus) {
     const oldIdx = codeIndex; // 旧树索引（可能含实时价格）
     root = buildTree(payload);
     // 合并实时价格：60 秒结构刷新不丢失实时行情（避免盘中价格跳回快照值）
-    if (oldIdx && oldIdx.size > 0) {
+    // v96：仅当旧值确实更新（本页实时循环最后成功晚于快照落盘时刻）才合并；快照更新时以快照为准——
+    // 否则午休/收盘后打开的页面会被页面内旧价持续盖住服务端新快照（含手动"全量更新"成功后的回显）
+    const snapAt = Date.parse(String(payload.fetched_at || "").replace(" ", "T"));
+    if (oldIdx && oldIdx.size > 0 && (!(snapAt > 0) || lastLiveAt > snapAt)) {
       // v90 三层树：合并到个股层（第三层），再自下而上重算 二级→一级→root
       for (const sec of root.children) {
         for (const ind of sec.children) {
@@ -1701,6 +1704,7 @@ let liveFailures = 0;
 let liveMode = false;
 let codeIndex = null;
 let lastLiveAttempt = 0;
+let lastLiveAt = 0;   // v96：主实时循环最近一次成功时刻（ms）；0=本页尚未跑过实时。fetchOnce 合并新旧价格的判据
 
 function isTradingTime() {
   const now = new Date();
@@ -2346,6 +2350,7 @@ async function refreshQuotes() {
     return;
   }
   liveFailures = 0;
+  lastLiveAt = Date.now();   // v96：标记旧树价格比其后落盘的快照新，fetchOnce 合并判据
   // 行业/大盘涨跌幅按最新个股重算（v90 三层：二级→一级→root；面积保持快照市值不变；6 个区间一并重算）
   for (const sec of root.children) {
     for (const ind of sec.children) recalcNodePcts(ind, ind.children);

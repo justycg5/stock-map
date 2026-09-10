@@ -1582,26 +1582,56 @@ def _refetch_if_needed():
     finally:
         _refetch_lock.release()
 
+def _at_today(now, h, m):
+    # 今天的 h:m（秒/微秒归零）
+    return now.replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def _next_weekday_at(now, h, m):
+    # 从 now 起下一个工作日 h:m（今天该时刻已过或逢周末则顺延）
+    t = _at_today(now, h, m)
+    while t <= now or t.weekday() >= 5:
+        t = t + datetime.timedelta(days=1)
+    return t
+
+
+def _snapshot_due_unfulfilled(now):
+    # 快照时刻已过但 data.json 仍缺（多为抓取失败）→ 需短间隔重试，而非干等下一个事件点
+    if now.weekday() >= 5:
+        return False
+    if now >= _at_today(now, *LUNCH_REFETCH_AT) and not _refetched_after(*LUNCH_REFETCH_AT):
+        return True
+    if now >= _at_today(now, *REFETCH_AT) and not _refetched_after(*REFETCH_AT):
+        return True
+    return False
+
+
+def _refetch_wake_wait():
+    # 距下一次醒来的秒数：已到期未完成 → 600s 重试；否则睡到下一个事件点（11:32/15:05，取更早者），
+    # 上限 3600s 心跳兜底（失败重算/时钟漂移）。触发时刻不再随服务启动相位漂移（v96 前 11:32 快照
+    # 可能拖到 12:03 才触发，正是午间看盘时段显示昨日收盘价的根因）。
+    if _snapshot_due_unfulfilled(datetime.datetime.now()):
+        return 600
+    now = datetime.datetime.now()
+    nxt = min(_next_weekday_at(now, *LUNCH_REFETCH_AT), _next_weekday_at(now, *REFETCH_AT))
+    return max(60, min((nxt - now).total_seconds(), 3600))
+
+
 def daily_refetch_loop():
     while True:
         try:
             now = datetime.datetime.now()
             # 触发点 1：交易日 11:32 午休快照（上午收盘后；周末跳过；幂等=当天 11:32 后已抓则跳过）
-            lunch_target = now.replace(hour=LUNCH_REFETCH_AT[0], minute=LUNCH_REFETCH_AT[1], second=0, microsecond=0)
-            if now >= lunch_target and now.weekday() < 5 and not _refetched_after(*LUNCH_REFETCH_AT):
-                print("[午休快照] 触发抓取（交易日 11:32）", flush=True)
+            if now.weekday() < 5 and now >= _at_today(now, *LUNCH_REFETCH_AT) and not _refetched_after(*LUNCH_REFETCH_AT):
+                print("[午休快照] 触发抓取（交易日 %02d:%02d）" % LUNCH_REFETCH_AT, flush=True)
                 _refetch_if_needed_lunch()
-            # 触发点 2：每日 15:05 收盘快照（原逻辑不变）
-            target = now.replace(hour=REFETCH_AT[0], minute=REFETCH_AT[1], second=0, microsecond=0)
-            if now >= target:
+            # 触发点 2：交易日 15:05 收盘快照（周末跳过——v96 前周六 15:05 仍会空抓一次；幂等=当天 15:05 后已抓则跳过）
+            if now.weekday() < 5 and now >= _at_today(now, *REFETCH_AT) and not _refetched_after(*REFETCH_AT):
+                print("[数据自动刷新] 触发抓取（交易日 %02d:%02d）" % REFETCH_AT, flush=True)
                 _refetch_if_needed()
-                target = target + datetime.timedelta(days=1)
-            while target.weekday() >= 5:  # 跳过周末，推到下一个周一
-                target = target + datetime.timedelta(days=1)
-            wait = (target - now).total_seconds()
-            time.sleep(max(60, min(wait, 3600)))  # 分段等待，每小时醒来重算
+            time.sleep(_refetch_wake_wait())
         except Exception:
-            time.sleep(3600)
+            time.sleep(300)
 
 
 def _refetch_if_needed_lunch():
