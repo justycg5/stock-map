@@ -129,6 +129,13 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=BASE, **kw)
 
+    def end_headers(self):
+        # v96 html/js 不缓存：否则手机端启发式缓存旧 app.js，代码修复到不了设备
+        path = (self.path or "").split("?")[0].lower()
+        if path in ("", "/") or path.endswith(".html") or path.endswith(".js"):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, fmt, *args):
         sys.stdout.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 

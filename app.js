@@ -1845,6 +1845,10 @@ function gMapLayout() {
   }
   return { layoutCenter: [Math.round(w / 2), Math.round(h / 2)], layoutSize: Math.round(w) };
 }
+// v97 触屏设备（主指针为粗指针）：roam 用 "move"（仅平移），双指缩放由 initGlobalChart 里的自管 pinch 接管
+const COARSE_POINTER = window.matchMedia ? window.matchMedia("(pointer: coarse)").matches : false;
+// 双指缩放灵敏度：1 = 完全跟随双指距离比例；<1 更迟钝（ECharts 内置是每次事件固定 ×1.1，过灵敏）
+const MAP_PINCH_SENSITIVITY = 0.7;
 function globalOption() {
   const maxAbs = gMaxAbs();
   return {
@@ -1873,7 +1877,9 @@ function globalOption() {
       text: ["涨", "跌"], textStyle: { color: "#8a94a6" }
     },
     series: [{
-      type: "map", map: "world", roam: true, zoom: 1.12, ...gMapLayout(),
+      type: "map", map: "world", roam: COARSE_POINTER ? "move" : true, zoom: 1.12, ...gMapLayout(),
+      // 缩放范围限制：0.8 防止缩出世界外，12 供细看小国
+      scaleLimit: { min: 0.8, max: 12 },
       label: { show: false },
       emphasis: { label: { show: true, color: "#fff", fontSize: 13 }, itemStyle: { areaColor: "#3b6ea5" } },
       itemStyle: { areaColor: "#1e2530", borderColor: "#3b5077", borderWidth: 0.6 },
@@ -1922,18 +1928,60 @@ async function initGlobalChart() {
       gPanelOpen = false;
     }
   });
+  // v97 触屏双指缩放自管：ECharts 内置 pinch 每个事件固定 ×1.1（与手指距离无关），
+  // 事件频率越高缩得越猛（120Hz 屏尤甚），手机上体感过灵敏。
+  // 此处按双指实际距离增量比（e.pinchScale）等比缩放，乘灵敏度系数。
+  const zr = gChart.getZr();
+  if (COARSE_POINTER) {
+    const sid = gChart.getModel().getSeriesByIndex(0).id;
+    let lastPinchT = 0;
+    zr.on("pinch", e => {
+      gMapDragging = true;   // v98 pinch 期间同样推迟数据刷新
+      const ev = (e.event && e.event.pinchScale !== undefined) ? e.event : e;
+      const ratio = ev.pinchScale;
+      const now = Date.now();
+      // 距上次事件超过 350ms = 新手势第一帧（识别器拿上一手势旧点会算出垃圾比例），跳过不缩放
+      if (now - lastPinchT > 350) { lastPinchT = now; return; }
+      lastPinchT = now;
+      if (!isFinite(ratio) || ratio <= 0.4 || ratio >= 2.5 || ratio === 1) return;
+      const step = Math.pow(ratio, MAP_PINCH_SENSITIVITY);
+      gChart.dispatchAction({ type: "geoRoam", seriesId: sid, zoom: step, originX: ev.pinchX, originY: ev.pinchY });
+    });
+  }
+  // v98 拖拽门控信号：触屏 touchstart/touchend 分别合成 zr mousedown/mouseup（见 lib HandlerProxy touch 分支）
+  zr.on("mousedown", () => { gMapDragging = true; gMapDragStart = Date.now(); });
+  zr.on("mouseup", () => { gMapDragging = false; gMapFlushPending(); });
 }
 function gMaxAbs() {
   // 固定 ±3% 区间：颜色对比稳定（全球指数日内极少超 ±3%），避免被极端值拉伸导致颜色趋同
   return 3;
 }
+// v98 拖拽门控：拖拽进行中推迟数据刷新的全量重渲染（触屏 touchstart/touchend 会合成 zr mousedown/mouseup，见 lib HandlerProxy touch 分支）；
+// 全量重绘手机上耗百毫秒级且更新动画每帧叠加，与拖拽同帧会冻结触控（断触感），松手后补刷
+let gMapDragging = false;
+let gMapDragStart = 0;
+let gMapRefreshPending = false;
+function gMapFlushPending() {
+  if (gMapRefreshPending) { gMapRefreshPending = false; renderGlobalMap(); }
+}
+// v96 尺寸变化后统一重适配：resize() 只按 model 里的旧布局参数适配，必须随后补上重算的布局
+function gRefitChart() {
+  if (!gChart) return;
+  gChart.resize();
+  gChart.setOption({ series: [gMapLayout()] });
+}
 function renderGlobalMap() {
   if (!gChart || !gWorld) return;
   // merge 模式局部更新（notMerge=true 会重建配置树导致地图黑屏）
   const maxAbs = gMaxAbs();
+  // v96 只更新数据，绝不动 layoutCenter/layoutSize：布局参数每次 merge 都会触发 ECharts 重新适配，
+  // 容器尺寸若在两次刷新之间变过（地址栏/旋转/页面缩放），地图就会在数据刷新瞬间跳位
+  // v98 拖拽中推迟（10s 兜底：touchcancel 等异常丢 mouseup 时恢复刷新，避免数据永久冻结）
+  if (gMapDragging && Date.now() - gMapDragStart < 10000) { gMapRefreshPending = true; return; }
   gChart.setOption({
+    animation: false,   // v98 数据更新直接切换颜色：默认 300ms 过渡动画期间每帧全量重绘，拖拽时叠加成断触
     visualMap: { min: -maxAbs, max: maxAbs },
-    series: [Object.assign(gMapLayout(), { data: buildMapData() })]
+    series: [{ data: buildMapData() }]
   });
   if (gPanelOpen) {
     const sel = gCountryMap.get(lastPanelRegion);
@@ -2303,7 +2351,7 @@ function switchView(v) {
   }
   if (v === "global") {
     if (!gChart) initGlobalChart();
-    else { renderGlobalMap(); setTimeout(() => gChart && gChart.resize(), 30); }
+    else { renderGlobalMap(); setTimeout(gRefitChart, 30); }
   }
   if (v === "futures") { fetchSpot(); if (fItems.length) renderFutures(); }
   if (v === "cal") { if (!calItems) fetchCalendar(); else renderCalendar(); }
@@ -2617,7 +2665,13 @@ document.getElementById("cpClose").addEventListener("click", () => {
   document.getElementById("countryPanel").classList.add("hidden");
   gPanelOpen = false;
 });
-window.addEventListener("resize", () => { if (gChart) { gChart.resize(); renderGlobalMap(); } });
+// v96 resize 防抖：地址栏动画/旋转会连发 resize，逐次重适配会让地图反复跳动
+let gResizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!gChart) return;
+  clearTimeout(gResizeTimer);
+  gResizeTimer = setTimeout(gRefitChart, 150);
+});
 
 // tooltip 锁定：鼠标移入浮层冻结位置，移出恢复跟随
 const tipLockEl = document.getElementById("tooltip");
@@ -3228,7 +3282,7 @@ let calItems = null;
 let calImp = "all", calType = "all";
 let calFetchedAt = "";
 let calStatus = null;  // {last_ok, last_fail}
-let calExpandedDays = null;   // 折叠态：null=未初始化（按默认规则），Set<date>=用户展开的日
+let calExpandedDays = null;   // 折叠态：null=未初始化（按默认规则），Set<date>=手动模式的展开日（首次点击时继承当前展开状态）
 const calExpanded = new Set();
 
 function calEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
@@ -3425,7 +3479,13 @@ function calMarkSeen() {
       if (!head) return;
       const date = head.getAttribute("data-day");
       if (!date) return;
-      if (calExpandedDays === null) calExpandedDays = new Set();
+      if (calExpandedDays === null) {
+        // 首次手动切换：继承当前实际展开的天（今天/明天/有新增），再叠加本次操作。
+        // 否则整表切入手动模式后，其余天会在下次重建（30s tick/数据刷新）时集体折叠
+        calExpandedDays = new Set(
+          Array.from(document.querySelectorAll("#calList .cal-day:not(.cal-col)"))
+            .map(el => el.id.slice("calday-".length)).filter(Boolean));
+      }
       if (calExpandedDays.has(date)) calExpandedDays.delete(date); else calExpandedDays.add(date);
       const day = document.getElementById("calday-" + date);
       if (!day) return;
