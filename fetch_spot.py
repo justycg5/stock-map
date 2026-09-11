@@ -95,7 +95,7 @@ def main():
             payload["q5500"] = q
             tmp = DATA_JSON + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=1)
+                json.dump(payload, f, ensure_ascii=False)  # 不用 indent：indent=1 会把 data.json 撑大 40%，移动端传输变慢
             os.replace(tmp, DATA_JSON)  # 原子写：避免浏览器读到半截 JSON
     except datalock.DataLockTimeoutError as e:
         sys.stderr.write("%s\n" % e)

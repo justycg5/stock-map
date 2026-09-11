@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>日历标题搜索功能评估与实施计划（v87）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; background: #0e1420; color: #e8ecf4; line-height: 1.75; padding: 36px 20px; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 25px; margin-bottom: 8px; }
+  .sub { color: #8a94a6; font-size: 14px; margin-bottom: 30px; border-bottom: 1px solid #232d42; padding-bottom: 16px; }
+  .card { background: #161b26; border: 1px solid #2a3550; border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; }
+  .card h2 { font-size: 16px; color: #6ea8ff; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p, .card li { font-size: 14px; color: #c8d0dd; }
+  ul, ol { padding-left: 22px; }
+  li { margin-bottom: 7px; }
+  b { color: #fff; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0; }
+  .metric { background: #1b2333; border: 1px solid #2a3550; border-radius: 10px; padding: 14px 16px; text-align: center; }
+  .metric .v { font-size: 22px; font-weight: 800; color: #6ea8ff; }
+  .metric .k { font-size: 12px; color: #8a94a6; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid #2a3550; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #1b2333; color: #6ea8ff; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .b-green { background: #1f9d5522; color: #4ade80; border: 1px solid #1f9d5555; }
+  .b-red { background: #e5484d22; color: #ff6b6b; border: 1px solid #e5484d55; }
+  .b-blue { background: #2a6fe022; color: #6ea8ff; border: 1px solid #2a6fe055; }
+  .b-gray { background: #4a556822; color: #9aa4b5; border: 1px solid #4a556855; }
+  .tag { color: #ffb454; }
+  .step { display: flex; gap: 14px; margin-bottom: 18px; }
+  .marker { flex: 0 0 30px; height: 30px; border-radius: 50%; background: #2a6fe0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; }
+  .step-body { flex: 1; }
+  .step-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .step-text { font-size: 13px; color: #9aa4b5; }
+  .code { background: #0d1320; border: 1px solid #232d42; border-radius: 6px; padding: 10px 14px; font-family: Consolas, monospace; font-size: 12.5px; color: #9fd0ff; margin: 10px 0; overflow-x: auto; white-space: pre; }
+  .warn { background: #3d2c0f; border: 1px solid #8a6d1f; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .ok { background: #0f2b1c; border: 1px solid #1f9d5555; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>日历标题搜索功能评估与实施计划</h1>
+  <div class="sub">a-share-heatmap · 拟版本 v87 · 2026-09-11 · 评估结论：可行且推荐实施，纯前端改造，零服务端/零数据源改动，约 90 行、5 个步骤、半个版本工作量</div>
+
+  <div class="card">
+    <h2>核心结论</h2>
+    <p>在日历工具栏（cal-bar）加一个<b>标题搜索输入框</b>：输入关键词实时过滤事件列表，匹配日自动展开、命中片段高亮、显示匹配计数；清空即恢复原视图。日历数据<b>全部在前端内存</b>（calendar.json 每次全量下发，当前 211 条 / 13 天），过滤就是一次内存 <span class="tag">includes()</span>，<b>零后端改动、零新增数据源</b>。现有过滤管线（星级/类型 pill）已有同构插槽，接入点唯一且清晰。</p>
+    <div class="metrics">
+      <div class="metric"><div class="v">5 步</div><div class="k">实施步骤（v87a~v87e）</div></div>
+      <div class="metric"><div class="v">~90 行</div><div class="k">新增/改动代码量估算</div></div>
+      <div class="metric"><div class="v">0</div><div class="k">服务端 / API / 依赖改动</div></div>
+      <div class="metric"><div class="v">211 条</div><div class="k">当前数据量（过滤毫秒级）</div></div>
+    </div>
+    <div class="ok">✓ 数据源纪律合规：纯内存字符串匹配，不发起任何网络请求。</div>
+  </div>
+
+  <div class="card">
+    <h2>一、需求定义</h2>
+    <table>
+      <tr><th>项</th><th>说明</th></tr>
+      <tr><td>核心能力</td><td>按关键词过滤日历事件的<b>标题</b>，快速定位「CPI」「非农」「美联储」「EIA 库存」等目标事件</td></tr>
+      <tr><td>交互形态</td><td>工具栏输入框，输入即过滤（200ms 防抖）；标题命中片段<b>高亮</b>；Esc / × 清空恢复</td></tr>
+      <tr><td>匹配规则</td><td>大小写不敏感的子串匹配（toLowerCase includes）；仅匹配 title 字段</td></tr>
+      <tr><td>与过滤组合</td><td>与现有星级/类型 pill <b>AND 叠加</b>（复用同一 vis 过滤管线）</td></tr>
+      <tr><td>展开联动</td><td>搜索激活期间：有命中的日<b>强制展开</b>（无视折叠态），无命中的日隐藏；清空后恢复用户折叠态</td></tr>
+      <tr><td>反馈</td><td>复用「今日重点」标题行显示「搜索 "xxx" · N 条匹配 / M 天」；0 命中显示专用空态</td></tr>
+      <tr><td>非目标</td><td>拼音首字母、繁简转换、正则/多关键词、历史范围回溯（数据本身就只有 14 天窗口）</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>二、现状事实（评估依据）</h2>
+    <table>
+      <tr><th>事实</th><th>数值 / 位置</th><th>对评估的影响</th></tr>
+      <tr><td>数据量</td><td>211 条事件 / 13 个日期 / 14 个国家（calendar.json 实测）</td><td>内存过滤毫秒级，无需索引、无需防抖以外的性能设计</td></tr>
+      <tr><td>标题语言构成</td><td>210 条含中文，86 条含英文字母（CPI、EIA、GDP、FOMC 等缩写）</td><td><b>必须大小写不敏感</b>（用户输入 "cpi" 要能命中 "CPI"）；中文直接 includes</td></tr>
+      <tr><td>标题长度</td><td>5~34 字符，均值 13.9</td><td>高亮注入简单，无超长截断问题</td></tr>
+      <tr><td>数据生命周期</td><td>前端 calItems 常驻，服务端每 5 分钟刷新落盘，前端 120s 拉取</td><td>搜索词过滤的是最新数据，30s/120s 重渲染天然继承搜索态</td></tr>
+      <tr><td>现有过滤管线</td><td>app.js renderCalendar 内 vis 过滤（calImp + calType 两条件）</td><td>搜索条件是第三个 <span class="tag">&amp;&amp;</span>，接入点唯一</td></tr>
+      <tr><td>空态处理</td><td>「当前过滤条件下无事件」已有</td><td>搜索 0 命中复用，仅换文案</td></tr>
+      <tr><td>浏览器 Ctrl+F 的缺口</td><td>折叠日的 body 是 <span class="tag">display:none</span>，Ctrl+F 搜不到；13 天中默认仅 8 天展开</td><td><b>这是本功能的核心价值</b>：Ctrl+F 无法覆盖折叠内容，且 30s 重渲染会打断查找高亮</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>三、方案设计</h2>
+    <table>
+      <tr><th>决策点</th><th>选项</th><th>结论</th></tr>
+      <tr>
+        <td>匹配范围</td>
+        <td>A. 仅标题　B. 标题 + 国家名（找「美国」全部事件）</td>
+        <td><span class="badge b-green">A · 仅标题（推荐）</span>功能名即「标题搜索」，语义可预期；B 的一字之差成本极低（一个 <span class="tag">||</span>），但「美国」会命中 60+ 条刷屏，且国家已有类型/星级维度可缩窄，留作 v1.1 开关</td>
+      </tr>
+      <tr>
+        <td>搜索期展开策略</td>
+        <td>A. 命中日强制展开（只读覆盖）　B. 维持用户折叠态　C. 把命中日写入 calExpandedDays</td>
+        <td><span class="badge b-green">A · 强制展开（推荐）</span>B 会让命中日藏在折叠里（功能形同虚设）；C 会<b>污染用户折叠态</b>，与 v87 刚修复的「继承式手动模式」（calExpandedDays 首次点击继承现状）相冲突——清空搜索后用户自己的折叠选择被改写。A 在 calDayHtml 里只读判断 <span class="tag">calQuery ? true : 原逻辑</span>，不碰 Set</td>
+      </tr>
+      <tr>
+        <td>高亮实现</td>
+        <td>A. 不高亮　B. 命中片段 &lt;mark&gt; 高亮</td>
+        <td><span class="badge b-green">B · 高亮（推荐）</span>先 calEsc 转义全文，再按大小写不敏感索引切三段拼 span（~10 行），杜绝 XSS：标题来自华尔街见闻外部源，<b>必须先转义再注入</b></td>
+      </tr>
+      <tr>
+        <td>输入框位置</td>
+        <td>A. cal-bar 类型 pill 之后　B. 锚点按钮之前</td>
+        <td><span class="badge b-green">A（推荐）</span>「筛选维度从粗到细」的阅读顺序：锚点 → 星级 → 类型 → 关键词；cal-bar 已 flex-wrap，窄屏自然换行，仅需补 min-width</td>
+      </tr>
+      <tr>
+        <td>今日重点（焦点卡）</td>
+        <td>A. 搜索期间隐藏　B. 保持显示</td>
+        <td><span class="badge b-green">A · 隐藏并复用其标题行（推荐）</span>搜索时用户注意力在结果上，焦点卡反而干扰；标题行正好用来显示「搜索 "xxx" · N 条匹配」</td></tr>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>四、与既有机制的交互（关键风险点逐条核对）</h2>
+    <ul>
+      <li><b>30s 倒计时重渲染 / 120s 数据重拉</b>：搜索词是模块级变量（同 calImp），重渲染自动继承；输入框位于 cal-bar（calList 之外），<b>innerHTML 重建不会打断输入焦点</b>——这是把输入框放 cal-bar 而非列表区的原因。</li>
+      <li><b>折叠状态（v87 刚修复的继承逻辑）</b>：搜索期展开是 calDayHtml 的只读覆盖，不写 calExpandedDays；清空搜索后按原逻辑（null=默认规则 / Set=手动模式）恢复，互不污染。用户在搜索期间点击天头部仍正常写 Set，与强制展开叠加无害（清空后以 Set 为准）。</li>
+      <li><b>IME 中文输入法</b>：<span style="color:#ff6b6b">必须处理</span>。拼音组词过程会连续触发 input 事件（输入 "feinong" 中途每个字母都过滤一次），需 compositionstart/end 标志位跳过组词期、compositionend 时再过滤；否则界面闪烁且中途态无意义。这是中文应用搜索框的标配处理。</li>
+      <li><b>锚点按钮（今日/本周/下周）</b>：搜索把目标日滤掉时 scrollIntoView 落空，现有 else 分支已弹「该日期范围暂无事件」toast，无需改动。</li>
+      <li><b>「新/升」标记与匹配叠加</b>：is_new/upgraded 徽标在行内渲染，与标题过滤正交，天然共存。</li>
+      <li><b>移动端</b>：cal-bar 无专属媒体查询规则，靠 flex-wrap；输入框补 <span class="tag">flex:1 1 140px; min-width:120px</span> 即可在窄屏占满一行，与页首股票搜索框（#search）的响应式处理同构。</li>
+      <li><b>XSS</b>：标题为外部抓取内容，高亮路径必须「先转义、后注入」；非高亮路径沿用现有 calEsc 不变。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>五、实施步骤（拟 v87a~v87e）</h2>
+    <div class="step"><div class="marker">1</div><div class="step-body">
+      <div class="step-title">v87a · 工具栏与状态（index.html + app.js ~20 行）</div>
+      <div class="step-text">cal-bar 类型组后加输入框（placeholder「搜索事件标题」+ × 清空按钮），CSS 补宽度规则；app.js 加 calQuery 状态与 200ms 防抖 input 监听（含 IME composition 守卫、Esc 清空）。</div>
+    </div></div>
+    <div class="step"><div class="marker">2</div><div class="step-body">
+      <div class="step-title">v87b · 过滤接入（app.js ~15 行）</div>
+      <div class="step-text">renderCalendar 的 vis 过滤加第三条件：!calQuery || it.title.toLowerCase().includes(calQuery)；0 命中空态文案区分「无匹配 "xxx"」。</div>
+    </div></div>
+    <div class="step"><div class="marker">3</div><div class="step-body">
+      <div class="step-title">v87c · 搜索期展开（app.js ~10 行）</div>
+      <div class="step-text">calDayHtml 展开判断改为：calQuery 非空时恒 true（只读覆盖，不写 calExpandedDays）；今日重点区隐藏，标题行改显匹配计数。</div>
+    </div></div>
+    <div class="step"><div class="marker">4</div><div class="step-body">
+      <div class="step-title">v87d · 标题高亮（app.js ~15 行）</div>
+      <div class="step-text">calRow 的 ttlt 渲染改为：calEsc 后按不敏感索引切三段，中段包金色 mark 样式（复用 --gold，与 ntag 视觉一致）。</div>
+    </div></div>
+    <div class="step"><div class="marker green">5</div><div class="step-body">
+      <div class="step-title">v87e · 验证（浏览器实测）</div>
+      <div class="step-text">① "cpi" 大小写命中；② 中文词 + IME 组词不闪烁；③ 命中日自动展开、清空后折叠态复原（含手动模式用户）；④ 与三星 pill 叠加；⑤ 0 命中空态；⑥ 30s 重渲染不断焦点、搜索态保持；⑦ 移动端 375px 宽度换行正常。</div>
+    </div></div>
+  </div>
+
+  <div class="card">
+    <h2>六、风险与非目标</h2>
+    <table>
+      <tr><th>项</th><th>等级</th><th>说明与对策</th></tr>
+      <tr><td>IME 组词期误过滤</td><td><span class="badge b-red">中</span></td><td>composition 守卫为必做项（步骤 1 内置），漏做会在中文输入时明显闪烁</td></tr>
+      <tr><td>高亮注入 XSS</td><td><span class="badge b-red">中</span></td><td>先转义后注入，步骤 4 严格约束；非搜索路径零改动</td></tr>
+      <tr><td>折叠态污染</td><td><span class="badge b-blue">低</span></td><td>只读覆盖设计已规避；步骤 3 明确不写 calExpandedDays</td></tr>
+      <tr><td>拼音 / 繁简匹配</td><td><span class="badge b-gray">非目标</span></td><td>需引入字典或数据预标注，收益不成比例；事件标题以官方缩写为主（CPI/EIA），精确子串已覆盖主场景</td></tr>
+      <tr><td>搜索历史持久化</td><td><span class="badge b-gray">非目标</span></td><td>v1 不做；如需可后续 localStorage 存最近 5 词</td></tr>
+    </table>
+    <div class="ok">✓ 总体结论：纯前端、接入点唯一、与刚修复的折叠状态机制正交可控，<b>推荐按 v87a~v87e 实施</b>。</div>
+  </div>
+</div>
+</body>
+</html>

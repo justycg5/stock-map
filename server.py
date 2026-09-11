@@ -148,6 +148,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_version(self):
+        """data.json 版本探测（文件 mtime，秒级）。
+        自动刷新轮询先比对这个值，快照没变（午休/收盘/周末）就不拉整包，移动端闲置流量≈0。"""
+        try:
+            st = os.stat(DATA_JSON)
+        except OSError:
+            return self._json({"ok": False, "v": 0})
+        return self._json({"ok": True, "v": int(st.st_mtime)})
+
     def _serve_static_gzip(self):
         """大体积文本静态文件按需 gzip 压缩响应（Tailscale 移动端提速：data.json 1.7MB→约 250KB）。
         仅 >150KB 的 .json/.js/.html/.css/.svg；API 与小文件不介入（小文件保留 304 协商）。"""
@@ -194,6 +203,8 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             pass
         path = self.path.split("?")[0]
+        if path == "/api/version":
+            return self._handle_version()
         if path == "/api/update":
             return self._handle_update()
         if path == "/api/costs":

@@ -193,6 +193,14 @@
 .cal-pill:hover { color: var(--text); }
 .cal-pill.on { background: #1c2735; border-color: #33415a; color: var(--text); }
 .cal-pill:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+.cal-search { position: relative; display: flex; align-items: center; }
+#calSearch { width: 180px; background: #0e1420; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 5px 24px 5px 10px; font-size: 12.5px; font-family: inherit; outline: none; }
+#calSearch::placeholder { color: var(--muted); }
+#calSearch:focus { border-color: #f0b429; }
+.cal-search-x { position: absolute; right: 7px; color: var(--muted); cursor: pointer; font-size: 12px; display: none; user-select: none; padding: 2px; }
+.cal-search-x:hover { color: var(--text); }
+.cal-search-x.show { display: block; }
+.cal-ev .ttlt mark { background: rgba(240, 180, 41, .16); color: var(--gold); font-weight: 700; padding: 0 1px; border-radius: 2px; }
 .cal-spacer { flex: 1; }
 .cal-stamp { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cal-stamp b { color: var(--text); font-weight: 600; }
@@ -454,6 +462,10 @@
   .controls { flex: 1 1 100%; flex-wrap: wrap; gap: 8px; }
   .searchbox { flex: 1; min-width: 0; }
   #search { width: 100%; }
+  .cal-bar { gap: 8px; }
+  .cal-searchbox { flex: 1 1 100%; }
+  .cal-search { flex: 1; }
+  #calSearch { width: 100%; }
   #rangeSel { order: 9; flex-basis: 100%; }
   #btnWl, #btnAlert { font-size: 0; padding: 6px 10px; white-space: nowrap; }
   #btnWl::before { content: "★"; font-size: 15px; }
@@ -620,6 +632,12 @@
       <button class="cal-pill" type="button" data-f="type" data-v="FE">经济数据</button>
       <button class="cal-pill" type="button" data-f="type" data-v="FD">财经事件</button>
     </div>
+    <div class="cal-fgroup cal-searchbox"><span class="cal-flabel">标题</span>
+      <div class="cal-search">
+        <input id="calSearch" type="text" placeholder="搜索事件标题" autocomplete="off" maxlength="40">
+        <span class="cal-search-x" id="calSearchX" title="清空">✕</span>
+      </div>
+    </div>
     <div class="cal-spacer"></div>
     <span class="cal-stamp" id="calStamp">加载中…</span>
     <button class="cal-refresh" id="calRefresh" type="button" title="立即抓取华尔街见闻最新日历（60 秒冷却）"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5"/></svg>更新</button>
@@ -705,6 +723,6 @@
     <button class="wm-item wm-cancel" data-act="close">取消</button>
   </div>
 </div>
-<script src="app.js?v=115"></script>
+<script src="app.js?v=119"></script>
 </body>
 </html>

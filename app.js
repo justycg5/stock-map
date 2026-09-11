@@ -171,8 +171,14 @@ function buildTree(payload) {
       for (const s of stocks) s.parent = node;
       return node;
     };
+    // v97：sectors.children 仅存行业名（行业明细与 industries 去重，data.json 体积减半），
+    // 按名反查 payload.industries 建树；兼容旧格式（children 内嵌行业对象）
+    const indByName = new Map((payload.industries || []).map(i => [i.name, i]));
     const secs = payload.sectors.map(sec => {
-      const indNodes = sec.children.map(mkInd);
+      const indNodes = sec.children
+        .map(c => (typeof c === "string" ? indByName.get(c) : c))
+        .filter(Boolean)
+        .map(mkInd);
       const node = {
         name: sec.name, value: sec.total_mcap && sec.total_mcap > 0 ? sec.total_mcap : 0.1,
         pe: sec.pe,
@@ -187,7 +193,7 @@ function buildTree(payload) {
       for (const c of indNodes) c.parent = node;
       return node;
     });
-    const allStocks3 = payload.sectors.reduce((a, s) => a.concat(s.children.reduce((b, ind) => b.concat(ind.stocks), [])), []);
+    const allStocks3 = secs.reduce((a, s) => a.concat(s.children.reduce((b, ind) => b.concat(ind.children), [])), []);
     const rootNode3 = {
       name: "全部A股",
       value: secs.reduce((s, x) => s + x.value, 0),
@@ -1612,10 +1618,48 @@ async function fetchData(showStatus) {
   await fetchOnce(showStatus);
 }
 
+// v98：data.json 共享加载器——并发请求合并为一次下载+解析（首页 init 的
+// fetchOnce/fetchSpot/fetchRe 三连发只需要同一份快照的不同字段，各拉一遍浪费 2/3 流量）
+let _djLast = null, _djLastAt = 0, _djInflight = null;
+let _djVer = null;   // v99：当前持有快照的版本（data.json mtime 秒级，来自响应 Last-Modified）
+function loadDataJson() {
+  if (_djInflight) return _djInflight;
+  _djInflight = fetch("data.json?t=" + Date.now(), { cache: "no-store" })
+    .then(res => res.json().then(payload => {
+      const lm = res.headers.get("Last-Modified");   // 秒级 mtime，与 /api/version 同源可比
+      _djVer = lm ? Math.floor(Date.parse(lm) / 1000) : null;
+      _djLast = payload; _djLastAt = Date.now();
+      return payload;
+    }))
+    .finally(() => { _djInflight = null; });
+  return _djInflight;
+}
+// v99：快照版本探测（~300B）。失败返回 null，调用方按"变了"处理（fail-open）
+async function probeDataVer() {
+  try {
+    const res = await fetch("/api/version?t=" + Date.now(), { cache: "no-store" });
+    const j = await res.json();
+    return (j && j.ok && j.v) ? j.v : null;
+  } catch (e) {
+    return null;
+  }
+}
+// v99：自动刷新轮询的节流——快照没变（午休/收盘/周末服务端不写盘）就不拉全包。
+// 只挂 60s 定时器路径；手动「全量更新」不探测，保证即时回显。
+async function autoFetchTick() {
+  const v = await probeDataVer();
+  if (v !== null && _djVer === v) return;
+  await fetchData(false);
+}
+// 快照是否够新：自动刷新周期 60s，90s 内视为有效；过期则重新拉，
+// 避免关闭自动刷新长时间挂页后，现货/稀土模块一直读极旧的快照
+function freshPayload() {
+  return (_djLast && Date.now() - _djLastAt < 90000) ? _djLast : null;
+}
+
 async function fetchOnce(showStatus) {
   try {
-    const res = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
-    const payload = await res.json();
+    const payload = await loadDataJson();
     const oldCurrentName = current ? current.name : null;
     const oldIdx = codeIndex; // 旧树索引（可能含实时价格）
     root = buildTree(payload);
@@ -1739,29 +1783,100 @@ function gNorm(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-// v91：开盘状态——东财源用 f124 行情时间戳新鲜度（<15 分钟=开盘中）；TE 源无 f124 返回 null（显示「快照」）
+// v99 交易所交易时段表（按指数代码）：[时区, 当地周几(0=周日), 时段[start,end]...（当地时间）]
+// 状态改为时刻表驱动（能表达 午休/未开盘）；东财源叠加行情时间戳兜底：时刻表说开盘中但 45 分钟无新打印
+// （节假日）则按已收盘显示。时段为常规规则，不含临时休市。
+const G_SESSIONS = {
+  "000001": ["Asia/Shanghai", [1,2,3,4,5], [["09:30","11:30"], ["13:00","15:00"]]],
+  "000300": ["Asia/Shanghai", [1,2,3,4,5], [["09:30","11:30"], ["13:00","15:00"]]],
+  "399006": ["Asia/Shanghai", [1,2,3,4,5], [["09:30","11:30"], ["13:00","15:00"]]],
+  "000688": ["Asia/Shanghai", [1,2,3,4,5], [["09:30","11:30"], ["13:00","15:00"]]],
+  "NDX":    ["America/New_York", [1,2,3,4,5], [["09:30","16:00"]]],
+  "DJIA":   ["America/New_York", [1,2,3,4,5], [["09:30","16:00"]]],
+  "SPX":    ["America/New_York", [1,2,3,4,5], [["09:30","16:00"]]],
+  "HSI":    ["Asia/Hong_Kong", [1,2,3,4,5], [["09:30","12:00"], ["13:00","16:00"]]],
+  "HSTECH": ["Asia/Hong_Kong", [1,2,3,4,5], [["09:30","12:00"], ["13:00","16:00"]]],
+  "TWII":   ["Asia/Taipei", [1,2,3,4,5], [["09:00","13:30"]]],
+  "N225":   ["Asia/Tokyo", [1,2,3,4,5], [["09:00","11:30"], ["12:30","15:30"]]],
+  "KS11":   ["Asia/Seoul", [1,2,3,4,5], [["09:00","15:30"]]],
+  "FTSE":   ["Europe/London", [1,2,3,4,5], [["08:00","16:30"]]],
+  "GDAXI":  ["Europe/Berlin", [1,2,3,4,5], [["09:00","17:30"]]],
+  "FCHI":   ["Europe/Paris", [1,2,3,4,5], [["09:00","17:30"]]],
+  "MIB":    ["Europe/Rome", [1,2,3,4,5], [["09:00","17:30"]]],
+  "IBEX":   ["Europe/Madrid", [1,2,3,4,5], [["09:00","17:30"]]],
+  "ATX":    ["Europe/Vienna", [1,2,3,4,5], [["09:00","17:30"]]],
+  "SSMI":   ["Europe/Zurich", [1,2,3,4,5], [["09:00","17:30"]]],
+  "STI":    ["Asia/Singapore", [1,2,3,4,5], [["09:00","12:00"], ["13:00","17:00"]]],
+  "SENSEX": ["Asia/Kolkata", [1,2,3,4,5], [["09:15","15:30"]]],
+  "AS51":   ["Australia/Sydney", [1,2,3,4,5], [["10:00","16:00"]]],
+  "TSX":    ["America/Toronto", [1,2,3,4,5], [["09:30","16:00"]]],
+  "BVSP":   ["America/Sao_Paulo", [1,2,3,4,5], [["10:00","17:00"]]],
+  "MXX":    ["America/Mexico_City", [1,2,3,4,5], [["08:30","15:00"]]],
+  "RTS":    ["Europe/Moscow", [1,2,3,4,5], [["10:00","18:50"]]],
+  "NZ50":   ["Pacific/Auckland", [1,2,3,4,5], [["10:00","16:45"]]],
+  "VNINDEX": ["Asia/Ho_Chi_Minh", [1,2,3,4,5], [["09:15","11:30"], ["13:00","14:45"]]],
+  "KLSE":   ["Asia/Kuala_Lumpur", [1,2,3,4,5], [["09:00","12:30"], ["14:30","17:00"]]],
+  "JKSE":   ["Asia/Jakarta", [1,2,3,4,5], [["09:00","12:00"], ["13:30","15:50"]]],
+  "PSI":    ["Asia/Manila", [1,2,3,4,5], [["09:30","12:00"], ["13:30","15:30"]]],
+  "SET":    ["Asia/Bangkok", [1,2,3,4,5], [["10:00","12:30"], ["14:30","16:30"]]],
+  // TE 中东源（周日常为周日至周四；无实时时间戳，纯时刻表判断）
+  "TE:TASI": ["Asia/Riyadh", [0,1,2,3,4], [["10:00","15:00"]]],
+  "TE:ADX General": ["Asia/Dubai", [1,2,3,4,5], [["10:00","15:00"]]],
+  "TE:DFM General": ["Asia/Dubai", [1,2,3,4,5], [["10:00","15:00"]]],
+  "TE:BIST 100": ["Europe/Istanbul", [1,2,3,4,5], [["10:00","18:00"]]],
+  "TE:TA-125": ["Asia/Jerusalem", [0,1,2,3,4], [["10:00","17:15"]]],
+  "TE:QE": ["Asia/Qatar", [0,1,2,3,4], [["09:30","13:00"]]],
+  "TE:MSM 30": ["Asia/Muscat", [0,1,2,3,4], [["10:00","12:00"]]],
+  "TE:ASE": ["Asia/Amman", [0,1,2,3,4], [["10:00","12:00"]]],
+  "TE:Kuwait All Share": ["Asia/Kuwait", [0,1,2,3,4], [["09:00","13:15"]]],
+  "TE:Estirad": ["Asia/Bahrain", [0,1,2,3,4], [["09:30","13:00"]]],
+  "TE:EGX 30": ["Africa/Cairo", [0,1,2,3,4], [["10:00","14:30"]]],
+  "TE:CFG 25": ["Africa/Casablanca", [1,2,3,4,5], [["09:30","15:40"]]],
+};
+const gTzFmtCache = {};
+function gLocMin(tz, now) {
+  let f = gTzFmtCache[tz];
+  if (!f) f = gTzFmtCache[tz] = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const p = {};
+  for (const x of f.formatToParts(now)) if (x.type !== "literal") p[x.type] = x.value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[p.weekday];
+  return { wd: wd, min: (+p.hour) * 60 + (+p.minute) };
+}
+function gSchedState(code, now) {
+  const cfg = G_SESSIONS[code];
+  if (!cfg) return null;
+  const loc = gLocMin(cfg[0], now);
+  if (cfg[1].indexOf(loc.wd) === -1) return "closed";
+  const hm = s => (+s.slice(0, 2)) * 60 + (+s.slice(3, 5));
+  const ss = cfg[2];
+  for (let i = 0; i < ss.length; i++) if (loc.min >= hm(ss[i][0]) && loc.min < hm(ss[i][1])) return "open";
+  if (ss.length > 1 && loc.min >= hm(ss[0][1]) && loc.min < hm(ss[1][0])) return "lunch";
+  return loc.min < hm(ss[0][0]) ? "pre" : "closed";
+}
+// v99 状态："open"开盘中 / "lunch"午间休市 / "pre"未开盘 / "closed"已收盘 / null 未知
 function gIsOpen(it) {
-  if (it.te) return null;
-  if (!it.time) return null;
-  return (Date.now() / 1000 - it.time) < 15 * 60;
+  const st = gSchedState(it.code, Date.now());
+  if (st === "open" && !it.te && it.time && Date.now() / 1000 - it.time > 45 * 60) return "closed";
+  return st;
 }
 function gOpenBadge(it) {
-  const o = gIsOpen(it);
-  if (o === null) return "<span style='color:#8a94a6;font-size:11px'>快照</span>";
-  return o ? "<span style='color:#3dd68c;font-size:11px'>● 开盘中</span>" : "<span style='color:#5c6678;font-size:11px'>○ 已收盘</span>";
+  const st = gIsOpen(it);
+  if (st === null) return "<span style='color:#8a94a6;font-size:11px'>快照</span>";
+  if (st === "open") return "<span style='color:#3dd68c;font-size:11px'>● 开盘中</span>";
+  if (st === "lunch") return "<span style='color:#f6ad55;font-size:11px'>☕ 午间休市</span>";
+  if (st === "pre") return "<span style='color:#6ea8fe;font-size:11px'>○ 未开盘</span>";
+  return "<span style='color:#5c6678;font-size:11px'>○ 已收盘</span>";
 }
 function gRegionOpen(arr) {
-  // 国家维度：任一指数开盘中 → 开盘中；全部有数据且全收 → 已收盘；否则 null
-  let anyOpen = false, allClosed = true, hasData = false;
+  // 国家维度取最强状态：开盘中 > 午休 > 未开盘 > 已收盘；全部未知返回 null
+  const rank = { open: 4, lunch: 3, pre: 2, closed: 1 };
+  let best = null;
   for (const it of arr) {
     const o = gIsOpen(it);
     if (o === null) continue;
-    hasData = true;
-    if (o) { anyOpen = true; allClosed = false; }
+    if (best === null || rank[o] > rank[best]) best = o;
   }
-  if (anyOpen) return true;
-  if (hasData && allClosed) return false;
-  return null;
+  return best;
 }
 function gRangeVal(it) {
   const field = RANGES.find(r => r.id === currentRange).field;
@@ -1866,7 +1981,11 @@ function globalOption() {
         }).join("");
         const more = arr.length > 6 ? "<div style='color:#8a94a6;margin-top:4px'>…共 " + arr.length + " 条，点击查看全部</div>" : "";
         const ro = gRegionOpen(arr);
-        const rBadge = ro === null ? "" : (ro ? " <span style='color:#3dd68c;font-size:11px'>● 开盘中</span>" : " <span style='color:#5c6678;font-size:11px'>○ 已收盘</span>");
+        const rBadge = ro === null ? "" :
+          (ro === "open" ? " <span style='color:#3dd68c;font-size:11px'>● 开盘中</span>" :
+           ro === "lunch" ? " <span style='color:#f6ad55;font-size:11px'>☕ 午间休市</span>" :
+           ro === "pre" ? " <span style='color:#6ea8fe;font-size:11px'>○ 未开盘</span>" :
+           " <span style='color:#5c6678;font-size:11px'>○ 已收盘</span>");
         return "<div style='font-weight:700;margin-bottom:4px'>" + p.name + " · " + arr[0].country + rBadge + "</div>" + rows + more;
       }
     },
@@ -2159,8 +2278,7 @@ function spotCls(s) {
 }
 async function fetchSpot() {
   try {
-    const res = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
-    const j = await res.json();
+    const j = freshPayload() || await loadDataJson();  // v98: 现货为日更数据，复用最近快照即可，不必整包重拉
     spotData = j && j.q5500 ? j.q5500 : null;
     renderSpot();
   } catch (e) {
@@ -2240,8 +2358,7 @@ function setReMsg(txt, cls) {
 }
 async function fetchRe() {
   try {
-    const res = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
-    const j = await res.json();
+    const j = freshPayload() || await loadDataJson();  // v98: 同 fetchSpot，复用最近快照
     reData = j && j.rare_earth ? j.rare_earth : null;
     renderRe();
   } catch (e) {
@@ -2542,7 +2659,7 @@ if (rangeSel) {
 autoRefreshEl.addEventListener("change", () => {
   clearInterval(autoTimer);
   if (autoRefreshEl.checked) {
-    autoTimer = setInterval(() => fetchData(false), AUTO_REFRESH_MS);
+    autoTimer = setInterval(autoFetchTick, AUTO_REFRESH_MS);
     tickLive();
   } else {
     stopLive();
@@ -3213,7 +3330,7 @@ function init() {
   baseScale = (WORLD_W < 1 ? H : Math.min(W, H)) * 0.98;   // 竖屏：世界高 1 → scale=H；横屏不变
   resetView();
   fetchData(false);
-  autoTimer = setInterval(() => fetchData(false), AUTO_REFRESH_MS);
+  autoTimer = setInterval(autoFetchTick, AUTO_REFRESH_MS);
   // 实时行情：交易时段每 8 秒直连东财刷新价格（可用 ?live=1 强制开启，供调试/复盘）
   setInterval(tickLive, 30000);
   tickLive();
@@ -3284,6 +3401,18 @@ let calFetchedAt = "";
 let calStatus = null;  // {last_ok, last_fail}
 let calExpandedDays = null;   // 折叠态：null=未初始化（按默认规则），Set<date>=手动模式的展开日（首次点击时继承当前展开状态）
 const calExpanded = new Set();
+let calQuery = "";            // 标题搜索词（空=未搜索）；重渲染自动继承
+let calSearchTimer = 0;
+
+function calApplySearch(q, xEl) {
+  calQuery = String(q || "").trim();
+  if (xEl) xEl.classList.toggle("show", !!calQuery);
+  renderCalendar();
+}
+function calSearchSchedule(input, xEl) {
+  clearTimeout(calSearchTimer);
+  calSearchTimer = setTimeout(() => calApplySearch(input.value, xEl), 200);
+}
 
 function calEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function calNum(x) { const n = parseFloat(x); return isNaN(n) ? null : n; }
@@ -3345,6 +3474,16 @@ function calActClass(it) {
   return " eq";
 }
 
+// 标题高亮：先整体转义，再按大小写不敏感索引切三段注入 <mark>（外部数据，禁止先注入后转义）
+function calTitleHtml(t) {
+  const s = String(t || "");
+  const q = calQuery.toLowerCase();
+  if (!q) return calEsc(s);
+  const i = s.toLowerCase().indexOf(q);
+  if (i < 0) return calEsc(s);
+  return calEsc(s.slice(0, i)) + "<mark>" + calEsc(s.slice(i, i + q.length)) + "</mark>" + calEsc(s.slice(i + q.length));
+}
+
 function calRow(it, nowTs, todayStr) {
   const dim = it.ts <= nowTs - 7200 ? " dim" : "";
   const open = calExpanded.has(String(it.id));
@@ -3353,7 +3492,7 @@ function calRow(it, nowTs, todayStr) {
     '<span class="t">' + it.t + '</span>' +
     '<span class="imp ' + (it.imp >= 3 ? "cal-star3" : "cal-star2") + '">' + it.imp + '\u2605</span>' +
     '<span class="cc">' + calEsc(it.country || it.cc) + '</span>' +
-    '<span class="ttl"><span class="ttlt">' + calEsc(it.title) + '</span>' + (it.is_new ? '<b class="ntag">新</b>' : "") + (it.upgraded ? '<b class="ntag up">升</b>' : "") + '</span>' +
+    '<span class="ttl"><span class="ttlt">' + calTitleHtml(it.title) + '</span>' + (it.is_new ? '<b class="ntag">新</b>' : "") + (it.upgraded ? '<b class="ntag up">升</b>' : "") + '</span>' +
     '<span class="cal-vals"><span class="v"><i>前值</i>' + calEsc(it.prev || "—") + '</span><span class="v"><i>预期</i>' + calEsc(it.fcst || "—") + '</span><span class="v' + actCls + '"><i>公布值</i>' + calEsc(it.actual || "—") + '</span></span>' +
     calBadge(it, nowTs, todayStr) + '</button>' +
     '<div class="cal-detail' + (open ? " open" : "") + '"><div class="row"><b>说明：</b>' + (it.foresight ? calEsc(it.foresight) : "暂无前瞻说明") + '</div>' +
@@ -3388,9 +3527,12 @@ function calDayHtml(date, items, nowTs, todayStr, tomorrowStr) {
   const label = date === todayStr ? "今天" : (date === tomorrowStr ? "明天" : "");
   const s3 = items.filter(x => x.imp >= 3).length;
   const nn = items.filter(x => x.is_new).length;
-  // 折叠：默认今天/明天/有新增展开；用户手动切换后按 calExpandedDays
+  // 折叠：默认今天/明天/有新增展开；用户手动切换后按 calExpandedDays；
+  // 搜索期强制展开——只读覆盖，不写 calExpandedDays，清空后恢复用户折叠态
   let expanded;
-  if (calExpandedDays === null) {
+  if (calQuery) {
+    expanded = true;
+  } else if (calExpandedDays === null) {
     expanded = (date === todayStr || date === tomorrowStr || nn > 0);
   } else {
     expanded = calExpandedDays.has(date);
@@ -3430,23 +3572,38 @@ function renderCalendar() {
   const nowTs = Date.now() / 1000;
   const todayStr = new Date().toLocaleDateString("sv");
   const tomorrowStr = calTomorrowStr();
-  // 今日重点：三星+，今天，最多 10 张
-  const focusItems = calItems.filter(it => it.imp >= 3 && it.date === todayStr).slice(0, 10);
-  if (focusItems.length) {
-    focusTitle.style.display = "";
-    focus.innerHTML = focusItems.map(it => calFocusCard(it, nowTs)).join("");
-  } else {
-    focusTitle.style.display = "none";
-    focus.innerHTML = "";
-  }
-  // 过滤 → 分组
+  // 过滤 → 分组（星级/类型 AND 标题搜索，大小写不敏感子串）
+  const q = calQuery.toLowerCase();
   const vis = calItems.filter(it =>
     (calImp === "all" || it.imp >= Number(calImp)) &&
-    (calType === "all" || it.type === calType));
+    (calType === "all" || it.type === calType) &&
+    (!q || String(it.title || "").toLowerCase().includes(q)));
   const groups = {};
   for (const it of vis) (groups[it.date] = groups[it.date] || []).push(it);
   const dates = Object.keys(groups).sort();
-  if (!dates.length) { list.innerHTML = '<div class="cal-empty">当前过滤条件下无事件</div>'; return; }
+  // 焦点区：搜索期间隐藏卡片，标题行复用为匹配计数
+  if (q) {
+    focusTitle.style.display = "";
+    focusTitle.textContent = "搜索 “" + calQuery + "” · " + vis.length + " 条匹配 · " + dates.length + " 天";
+    focus.innerHTML = "";
+  } else {
+    // 今日重点：三星+，今天，最多 10 张
+    const focusItems = calItems.filter(it => it.imp >= 3 && it.date === todayStr).slice(0, 10);
+    if (focusItems.length) {
+      focusTitle.style.display = "";
+      focusTitle.textContent = "今日重点（三星及以上）";
+      focus.innerHTML = focusItems.map(it => calFocusCard(it, nowTs)).join("");
+    } else {
+      focusTitle.style.display = "none";
+      focus.innerHTML = "";
+    }
+  }
+  if (!dates.length) {
+    list.innerHTML = q
+      ? '<div class="cal-empty">无匹配 “' + calEsc(calQuery) + '” 的事件</div>'
+      : '<div class="cal-empty">当前过滤条件下无事件</div>';
+    return;
+  }
   list.innerHTML = dates.map(d => calDayHtml(d, groups[d], nowTs, todayStr, tomorrowStr)).join("");
 }
 
@@ -3502,6 +3659,19 @@ function calMarkSeen() {
         e.preventDefault(); e.target.click();
       }
     });
+  }
+  // 标题搜索：IME 组词期跳过过滤（拼音字母不触发），compositionend 后统一应用
+  const sInput = document.getElementById("calSearch");
+  const sX = document.getElementById("calSearchX");
+  if (sInput) {
+    let composing = false;
+    sInput.addEventListener("compositionstart", () => { composing = true; });
+    sInput.addEventListener("compositionend", () => { composing = false; calSearchSchedule(sInput, sX); });
+    sInput.addEventListener("input", () => { if (!composing) calSearchSchedule(sInput, sX); });
+    sInput.addEventListener("keydown", e => {
+      if (e.key === "Escape" && sInput.value) { sInput.value = ""; calApplySearch("", sX); sInput.blur(); }
+    });
+    if (sX) sX.addEventListener("click", () => { sInput.value = ""; calApplySearch("", sX); sInput.focus(); });
   }
   bar.addEventListener("click", e => {
     const p = e.target.closest(".cal-pill");

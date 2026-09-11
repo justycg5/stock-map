@@ -685,7 +685,9 @@ def main():
             "pe": (num / den) if den else None,
             "pct": wp("pct"), "pct5": wp("pct5"), "pct10": wp("pct10"),
             "pct20": wp("pct20"), "pct60": wp("pct60"), "pctYTD": wp("pctYTD"),
-            "children": sorted(children, key=lambda x: -x["total_mcap"]),
+            # children 只存行业名（行业明细在 industries 已有一份，内嵌会把全部股票写两遍，
+            # data.json 体积翻倍；前端按名从 payload.industries 反查建树）
+            "children": [c["name"] for c in sorted(children, key=lambda x: -x["total_mcap"])],
         })
     sectors.sort(key=lambda x: -x["total_mcap"])
 
