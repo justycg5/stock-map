@@ -2027,7 +2027,9 @@ async function initGlobalChart() {
   if (!el || !window.echarts) return;
   gChart = echarts.init(el);
   try {
-    const r = await fetch("map/world.json?t=" + Date.now());
+    // v100 world.json 内容不可变（地图底图），固定 ?v= 版本号走浏览器长缓存；
+    // 升级地图文件时同步改此版本号。原 ?t=Date.now() 会把 286KB 不可变内容当新文件每次重拉
+    const r = await fetch("map/world.json?v=20260806");
     gWorld = await r.json();
     echarts.registerMap("world", gWorld);
   } catch (e) {

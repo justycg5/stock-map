@@ -125,14 +125,23 @@ REFETCH_COOLDOWN_S = 600        # 手动重抓冷却（秒）
 _last_refetch = {"ts": 0}       # 手动重抓时间戳
 _refetch_lock = threading.Lock()  # 重抓并发锁（防自动/手动同时抓）
 
+# v100 gzip 结果缓存：key=(绝对路径, mtime_ns, size)。文件原子替换（os.replace）后 mtime 变化自动失效
+_GZ_CACHE = {}
+_GZ_CACHE_MAX = 16
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=BASE, **kw)
 
     def end_headers(self):
-        # v96 html/js 不缓存：否则手机端启发式缓存旧 app.js，代码修复到不了设备
+        # v100 缓存策略分三类：
+        #  1) lib/、map/ 内容不可变（echarts 5.6.0 / world 底图，只在手动升级时变且必带 ?v=）→ 长缓存 immutable
+        #  2) html/js（app.js、index.html 改动频繁）不缓存：否则手机端启发式缓存旧代码，修复到不了设备（v96）
+        #  3) 其余（数据 json 等）沿用默认协商行为
         path = (self.path or "").split("?")[0].lower()
-        if path in ("", "/") or path.endswith(".html") or path.endswith(".js"):
+        if path.startswith("/lib/") or path.startswith("/map/"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        elif path in ("", "/") or path.endswith(".html") or path.endswith(".js"):
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -159,10 +168,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _serve_static_gzip(self):
         """大体积文本静态文件按需 gzip 压缩响应（Tailscale 移动端提速：data.json 1.7MB→约 250KB）。
-        仅 >150KB 的 .json/.js/.html/.css/.svg；API 与小文件不介入（小文件保留 304 协商）。"""
+        仅 >30KB 的 .json/.js/.html/.css/.svg（v100：150KB→30KB，纳入 index.html/calendar.json）；
+        API 与小文件不介入（小文件保留 304 协商）。
+        压缩结果按 (路径, mtime, size) 缓存：data.json 每请求现场压 2MB 约 100ms CPU，
+        缓存后同一快照只压一次，TTFB 即时。"""
         path = self.path.split("?")[0]
         if path.startswith("/api/") or ".." in path:
             return False
+        if path in ("", "/"):
+            path = "/index.html"   # 首页走 gzip（49KB→约 13KB）
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".json", ".js", ".html", ".css", ".svg"):
             return False
@@ -174,12 +188,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not os.path.isfile(full):
                 return False
             st = os.stat(full)
-            if st.st_size <= 150 * 1024:
+            if st.st_size <= 30 * 1024:
                 return False
             ctype = mimetypes.guess_type(full)[0] or ("application/json" if ext == ".json" else "application/octet-stream")
-            with open(full, "rb") as fp:
-                raw = fp.read()
-            gz = gzip.compress(raw, 5)
+            key = (full, st.st_mtime_ns, st.st_size)
+            gz = _GZ_CACHE.get(key)
+            if gz is None:
+                with open(full, "rb") as fp:
+                    raw = fp.read()
+                gz = gzip.compress(raw, 5)
+                if len(_GZ_CACHE) >= _GZ_CACHE_MAX:
+                    _GZ_CACHE.clear()   # 简单防膨胀；GIL 下 dict 读写原子，最坏多压一次
+                _GZ_CACHE[key] = gz
         except Exception:
             return False
         try:
@@ -1841,6 +1861,9 @@ def alert_loop():
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    # v100 HTTP/1.1 keep-alive：移动端高 RTT 下首屏十几个请求复用一条 TCP 连接，省每次握手延迟。
+    # 安全前提已审：所有响应路径（_json/gzip/静态/SimpleHTTP 404）均显式发 Content-Length，无流式端点
+    Handler.protocol_version = "HTTP/1.1"
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     threading.Thread(target=alert_loop, daemon=True).start()
     threading.Thread(target=daily_refetch_loop, daemon=True).start()
