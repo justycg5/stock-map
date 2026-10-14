@@ -24,6 +24,10 @@ const QUOTE_BATCH = 500;         // 实时行情每批最多 500 个代码（服
 const QUOTE_CONCURRENCY = 6;     // 并发批数
 const QUOTE_INTERVAL_MS = 8000;  // 实时刷新间隔（秒级，交易时段）
 const QUOTE_URL = "https://push2delay.eastmoney.com/api/qt/ulist.np/get";
+const TX_QUOTE_URL = "https://qt.gtimg.cn/q=";   // v102 前端实时备源（东财被风控时自动切换）
+let quoteChannel = "em";          // em=东财主源 / tx=腾讯备源
+let quoteEmFailStreak = 0;        // 东财连续失败批数
+let quoteEmProbeAt = 0;           // 备源期间上次东财探测时刻（每 5 分钟探测一次）
 // ---------- 区间涨跌幅（一期：预设 6 档，字段一次请求全部取得） ----------
 const RANGES = [
   { id: "day", label: "当日", field: "pct" },
@@ -1768,13 +1772,68 @@ function buildCodeIndex() {
   }
 }
 
-async function fetchQuotesBatch(secids) {
+// v102 腾讯批量备源：sh/sz 代码 → 等价 diff 结构（f12/f14/f2/f3/f4/f6；区间涨幅字段腾讯无，不填）
+// 字段位（实测校准 2026-09-24）：1名称 2代码 3现价 4昨收 31涨跌额 32涨跌幅% 37成交额(万)
+const _txDec = (typeof TextDecoder !== "undefined") ? new TextDecoder("gbk") : null;
+async function txQuotesBatch(codes) {
+  const qs = codes.map(c => (c.startsWith("6") ? "sh" : "sz") + c).join(",");
+  const res = await fetch(TX_QUOTE_URL + qs, { cache: "no-store" });
+  if (!res.ok) throw new Error("tx http " + res.status);
+  const buf = await res.arrayBuffer();
+  const body = _txDec ? _txDec.decode(buf) : decodeURIComponent(escape(String.fromCharCode(...new Uint8Array(buf))));
+  const out = [];
+  const re = /v_(?:sh|sz)(\d{6})="([^"]*)"/g;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const f = m[2].split("~");
+    if (f.length < 33 || !f[3] || f[3] === "0.00") continue;
+    out.push({
+      f12: m[1],
+      f14: f[1],
+      f2: Number(f[3]),
+      f3: Number(f[32]),
+      f4: Number(f[31]),
+      f6: f[37] ? Number(f[37]) * 10000 : undefined,  // 腾讯单位万元 → 东财单位元
+    });
+  }
+  return out;
+}
+
+async function fetchQuotesBatchEm(secids) {
   const qs = "secids=" + secids.join(",") +
     "&fields=f12,f2,f3,f4,f6,f109,f160,f110,f24,f25&fltt=2&invt=2&np=1&pn=1&pz=" + secids.length;
   const res = await fetch(QUOTE_URL + "?" + qs, { cache: "no-store" });
   if (!res.ok) throw new Error("quote http " + res.status);
   const j = await res.json();
   return (j && j.data && j.data.diff) || [];
+}
+
+// v102 通道机：em 主源；东财连续 2 批失败 → tx；tx 失败计入 liveFailures；em 每 5 分钟探测回切
+async function fetchQuotesBatch(secids) {
+  if (quoteChannel === "em") {
+    try {
+      const r = await fetchQuotesBatchEm(secids);
+      quoteEmFailStreak = 0;
+      return r;
+    } catch (e) {
+      quoteEmFailStreak++;
+      if (quoteEmFailStreak >= 2) quoteChannel = "tx";
+      throw e;
+    }
+  }
+  // tx 通道
+  try {
+    const r = await txQuotesBatch(secids.map(s => String(s).split(".")[1] || s));
+    return r;
+  } catch (e) {
+    throw e;
+  } finally {
+    const now = Date.now();
+    if (now - quoteEmProbeAt > 5 * 60 * 1000) {
+      quoteEmProbeAt = now;
+      fetchQuotesBatchEm(secids).then(() => { quoteChannel = "em"; quoteEmFailStreak = 0; }).catch(() => {});
+    }
+  }
 }
 
 // ---------- 全球指数地图（v20） ----------
@@ -2189,24 +2248,26 @@ async function fetchFuturesQuotes() {
     setFStatus("期货实时：数据未加载", "err");
     return;
   }
-  const secids = fItems.map(i => i.secid);
+  // v104：盘中实时走本地代理 /api/fut_quotes（新浪源），不再请求东财
   try {
-    const url = QUOTE_URL + "?fltt=2&pn=1&pz=40&np=1&fields=f2,f3,f4,f12,f124&secids=" + secids.join(",");
-    const res = await fetch(url);
+    const res = await fetch("/api/fut_quotes?t=" + Date.now(), { cache: "no-store" });
     if (!res.ok) {
       setFStatus("期货实时：HTTP " + res.status, "err");
       return;
     }
     const j = await res.json();
-    const diff = (j && j.data && j.data.diff) || [];
-    setFStatus("期货实时：✓ " + new Date().toLocaleTimeString() + " 收到 " + diff.length + " 条", "ok");
-    const byCode = {};
-    for (const x of diff) byCode[x.f12] = x;
+    if (!j || !j.ok) {
+      setFStatus("期货实时：代理失败 " + ((j && j.msg) || ""), "err");
+      return;
+    }
+    const q = j.quotes || {};
+    setFStatus("期货实时：✓ " + new Date().toLocaleTimeString() + " 收到 " + Object.keys(q).length + " 条" + (j.fresh ? "" : "（缓存）"), "ok");
+    const byCode = q;
     let changed = false;
     for (const it of fItems) {
-      const x = byCode[it.code];
+      const x = byCode[it.code] || byCode[String(it.code).toLowerCase()];
       if (!x) continue;
-      const nu = { price: fNorm(x.f2), pct: fNorm(x.f3), chg: fNorm(x.f4), time: x.f124 };
+      const nu = { price: fNorm(x.price), pct: fNorm(x.pct), chg: fNorm(x.chg), time: x.time };
       if (nu.price !== it.price || nu.pct !== it.pct || nu.chg !== it.chg || nu.time !== it.time) {
         changed = true;
         Object.assign(it, nu);
@@ -2549,7 +2610,7 @@ function updateLiveState() {
   const el = document.getElementById("statLive");
   if (!el) return;
   if (liveMode) {
-    el.textContent = "实时 8s · " + new Date().toTimeString().slice(0, 8);
+    el.textContent = "实时 8s · " + (quoteChannel === "tx" ? "备源 " : "") + new Date().toTimeString().slice(0, 8);
   } else if (liveFailures >= 3) {
     el.textContent = "实时已降级(60s)";
   } else if (!isTradingTime()) {
@@ -3026,7 +3087,16 @@ async function alertCfgLoad() {
     const st = document.getElementById("awhStatus");
     if (st) st.textContent = c.hasKey ? ("已配置 " + c.webhook) : "未配置";
     const inp = document.getElementById("awhInput");
-    if (inp) inp.placeholder = c.hasKey ? c.webhook : "企业微信群机器人 webhook 地址";
+    if (inp) inp.placeholder = c.hasKey ? c.webhook : "期货告警群 webhook 地址";
+  } catch (e) {}
+  try {
+    const res2 = await fetch("/api/stockalertcfg", { cache: "no-store" });
+    const j2 = await res2.json();
+    const c2 = (j2 && j2.cfg) || {};
+    const st2 = document.getElementById("swhStatus");
+    if (st2) st2.textContent = c2.hasKey ? ("已配置 " + c2.webhook) : "未配置";
+    const inp2 = document.getElementById("swhInput");
+    if (inp2) inp2.placeholder = c2.hasKey ? c2.webhook : "股票告警群 webhook 地址";
   } catch (e) {}
 }
 function awhSave() {
@@ -3038,14 +3108,31 @@ function awhSave() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ webhook: url })
   }).then(r => r.json()).then(j => {
-    if (j && j.ok) { showToast("股价告警 webhook 已保存"); if (inp) inp.value = ""; alertCfgLoad(); }
+    if (j && j.ok) { showToast("期货告警群 webhook 已保存"); if (inp) inp.value = ""; alertCfgLoad(); }
     else showToast("保存失败：" + ((j && j.msg) || "未知"));
   }).catch(() => showToast("服务不可用"));
 }
 const awhSaveEl = document.getElementById("awhSave");
 if (awhSaveEl) awhSaveEl.addEventListener("click", awhSave);
 const awhTestEl = document.getElementById("awhTest");
-if (awhTestEl) awhTestEl.addEventListener("click", alertTestSend);
+if (awhTestEl) awhTestEl.addEventListener("click", () => alertTestSend("fut"));
+function swhSave() {
+  const inp = document.getElementById("swhInput");
+  const url = inp ? inp.value.trim() : "";
+  if (!url) { showToast("请输入 webhook 地址"); return; }
+  fetch("/api/stockalertcfg", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ webhook: url })
+  }).then(r => r.json()).then(j => {
+    if (j && j.ok) { showToast("股票告警群 webhook 已保存"); if (inp) inp.value = ""; alertCfgLoad(); }
+    else showToast("保存失败：" + ((j && j.msg) || "未知"));
+  }).catch(() => showToast("服务不可用"));
+}
+const swhSaveEl = document.getElementById("swhSave");
+if (swhSaveEl) swhSaveEl.addEventListener("click", swhSave);
+const swhTestEl = document.getElementById("swhTest");
+if (swhTestEl) swhTestEl.addEventListener("click", () => alertTestSend("stock"));
 function alertSave() {
   return fetch("/api/alerts", {
     method: "POST",
@@ -3127,15 +3214,16 @@ const btnAlertEl = document.getElementById("btnAlert");
 if (btnAlertEl) btnAlertEl.addEventListener("click", alertToggle);
 const alertAddEl = document.getElementById("alertAdd");
 if (alertAddEl) alertAddEl.addEventListener("click", () => alertEditOpen("", null));
-async function alertTestSend() {
+async function alertTestSend(mkt) {
+  const label = mkt === "stock" ? "股票" : "期货";
   try {
-    const res = await fetch("/api/alerttest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: "来自告警面板的测试" }) });
+    const res = await fetch("/api/alerttest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mkt: mkt === "stock" ? "stock" : "fut", msg: "来自告警面板的测试" }) });
     const j = await res.json();
-    showToast(j && j.ok ? "测试消息已推送" : ("推送失败：" + ((j && j.msg) || "未知")));
-  } catch (e) { showToast("测试失败：接口不可用"); }
+    showToast(j && j.ok ? (label + "群测试消息已推送") : (label + "群推送失败：" + ((j && j.msg) || "未知")));
+  } catch (e) { showToast(label + "群测试失败：接口不可用"); }
 }
 const alertTestEl = document.getElementById("alertTest");
-if (alertTestEl) alertTestEl.addEventListener("click", alertTestSend);
+if (alertTestEl) alertTestEl.addEventListener("click", () => alertTestSend("fut"));
 
 // 编辑弹窗
 const aeEditorEl = document.getElementById("alertEditor");
@@ -3416,6 +3504,88 @@ function calSearchSchedule(input, xEl) {
   calSearchTimer = setTimeout(() => calApplySearch(input.value, xEl), 200);
 }
 
+// ===== 日历当日备忘（v88：键=日期，localStorage + 服务端 calnotes.json 双写，与股票备注同模式） =====
+const CAL_NOTES_KEY = "cal_day_notes_v1";
+let calDayNotes = {};
+function calNotesLoad() {
+  try { calDayNotes = JSON.parse(localStorage.getItem(CAL_NOTES_KEY)) || {}; } catch (e) { calDayNotes = {}; }
+  if (!calDayNotes || typeof calDayNotes !== "object") calDayNotes = {};
+  fetch("/api/calnotes", { cache: "no-store" }).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || !d.ok || typeof d.notes !== "object" || !d.notes) return;
+    calDayNotes = d.notes;
+    try { localStorage.setItem(CAL_NOTES_KEY, JSON.stringify(calDayNotes)); } catch (e) {}
+    if (calItems) renderCalendar();  // 日历数据未到时不重渲染，避免覆盖「加载中」占位
+  }).catch(() => {});
+}
+function calNoteGet(date) { return (calDayNotes && calDayNotes[date]) ? calDayNotes[date] : ""; }
+function calNotesSave() {
+  try { localStorage.setItem(CAL_NOTES_KEY, JSON.stringify(calDayNotes)); } catch (e) {}
+  try {
+    fetch("/api/calnotes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(calDayNotes)
+    }).catch(() => {});
+  } catch (e) {}
+}
+
+// ===== 当日备忘编辑器（复用 .ne-* 样式；定位在所点日期头下方，越界翻转，移动端居中） =====
+const cneEl = document.getElementById("calNoteEditor");
+const cneTextEl = document.getElementById("cneText");
+const cneTitleEl = document.getElementById("cneTitle");
+const cneCountEl = document.getElementById("cneCount");
+let cneEditingDate = null;
+function openCalNoteEditor(date) {
+  if (!cneEl || !cneTextEl || !date) return;
+  cneEditingDate = date;
+  const d = new Date(date + "T12:00:00");
+  const todayStr = new Date().toLocaleDateString("sv");
+  const wd = "周" + "日一二三四五六"[d.getDay()];
+  const label = date === todayStr ? " · 今天" : "";
+  cneTitleEl.textContent = parseInt(date.slice(5, 7), 10) + "月" + parseInt(date.slice(8), 10) + "日 " + wd + label + " · 当日备忘";
+  cneTextEl.value = calNoteGet(date);
+  if (cneCountEl) cneCountEl.textContent = cneTextEl.value.length + "/200";
+  cneEl.classList.remove("hidden");
+  const ew = 260, eh = 200;
+  const head = document.querySelector('.cal-day-head[data-day="' + date + '"]');
+  const r = head ? head.getBoundingClientRect() : { left: window.innerWidth / 2 - ew / 2, bottom: window.innerHeight / 2, top: window.innerHeight / 2 };
+  if (window.innerWidth <= 768) {
+    cneEl.style.left = Math.max(8, (window.innerWidth - ew) / 2) + "px";
+    cneEl.style.top = Math.max(8, window.innerHeight * 0.25) + "px";
+  } else {
+    let ex = r.left, ey = r.bottom + 8;
+    if (ex + ew > window.innerWidth - 8) ex = window.innerWidth - ew - 8;
+    if (ey + eh > window.innerHeight - 8) ey = Math.max(8, r.top - eh - 8);
+    cneEl.style.left = Math.max(8, ex) + "px";
+    cneEl.style.top = Math.max(8, ey) + "px";
+  }
+  cneTextEl.focus();
+}
+function closeCalNoteEditor() { cneEditingDate = null; if (cneEl) cneEl.classList.add("hidden"); }
+function saveCalNote() {
+  if (!cneEditingDate) return;
+  const d = cneEditingDate;
+  const t = cneTextEl.value.trim();
+  if (t) calDayNotes[d] = t; else delete calDayNotes[d];
+  calNotesSave();
+  closeCalNoteEditor();
+  renderCalendar();
+  showToast(t ? "备忘已保存" : "备忘已删除");
+}
+if (cneEl) {
+  const cneSaveEl = document.getElementById("cneSave");
+  const cneDelEl = document.getElementById("cneDel");
+  const cneCloseEl = document.getElementById("cneClose");
+  if (cneSaveEl) cneSaveEl.addEventListener("click", saveCalNote);
+  if (cneDelEl) cneDelEl.addEventListener("click", () => { cneTextEl.value = ""; saveCalNote(); });
+  if (cneCloseEl) cneCloseEl.addEventListener("click", closeCalNoteEditor);
+  cneTextEl.addEventListener("input", () => { if (cneCountEl) cneCountEl.textContent = cneTextEl.value.length + "/200"; });
+  cneTextEl.addEventListener("keydown", e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); saveCalNote(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeCalNoteEditor(); }
+  });
+}
+
 function calEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function calNum(x) { const n = parseFloat(x); return isNaN(n) ? null : n; }
 function calTomorrowStr() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toLocaleDateString("sv"); }
@@ -3539,11 +3709,18 @@ function calDayHtml(date, items, nowTs, todayStr, tomorrowStr) {
   } else {
     expanded = calExpandedDays.has(date);
   }
-  return '<section class="cal-day' + (expanded ? "" : " cal-col") + '" id="calday-' + date + '">' +
+  // 当日备忘：头部标签只显示第一行（16 字截断，title 看全文），折叠日同样可见
+  const noteText = calNoteGet(date);
+  const noteShort = noteText ? noteText.split("\n")[0].replace(/\s+/g, " ").trim() : "";
+  const noteShow = noteShort.length > 16 ? noteShort.slice(0, 16) + "…" : noteShort;
+  return '<section class="cal-day' + (noteText ? " has-note" : "") + (expanded ? "" : " cal-col") + '" id="calday-' + date + '">' +
     '<div class="cal-day-head" role="button" tabindex="0" data-day="' + date + '" aria-expanded="' + (expanded ? "true" : "false") + '">' +
     '<span class="cal-day-arrow">' + (expanded ? "\u25BE" : "\u25B8") + '</span>' +
     '<span class="d-date">' + parseInt(date.slice(5, 7), 10) + '月' + parseInt(date.slice(8), 10) + '日</span>' +
     '<span class="d-week">' + wd + (label ? " · " + label : "") + '</span>' +
+    (noteText
+      ? '<button type="button" class="d-note" data-day="' + date + '" title="' + calEsc(noteText) + '（点击编辑）">📌 ' + calEsc(noteShow) + '</button>'
+      : '<button type="button" class="d-note-add" data-day="' + date + '" title="记录当天最重要的事">＋ 备忘</button>') +
     '<span class="d-meta">' + items.length + ' 条 · 三星 <b>' + s3 + '</b>' + (nn ? ' · <b class="n-ct">新增 ' + nn + '</b>' : "") + '</span></div>' +
     '<div class="cal-day-body"' + (expanded ? "" : ' style="display:none"') + '>' + items.map(it => calRow(it, nowTs, todayStr)).join("") + '</div></section>';
 }
@@ -3631,9 +3808,13 @@ function calMarkSeen() {
 (function initCalendar() {
   const bar = document.getElementById("calBar");
   if (!bar) return;
+  calNotesLoad();  // 日历备忘：此处各声明均已求值（顶层 init 区调用会触发 calDayNotes 的 TDZ）
   const calList = document.getElementById("calList");
   if (calList) {
     calList.addEventListener("click", e => {
+      // 备忘控件先行拦截：打开编辑器，绝不触发折叠切换
+      const nb = e.target.closest(".d-note, .d-note-add");
+      if (nb) { openCalNoteEditor(nb.getAttribute("data-day")); return; }
       const head = e.target.closest(".cal-day-head");
       if (!head) return;
       const date = head.getAttribute("data-day");

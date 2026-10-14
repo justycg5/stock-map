@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>日历当日备忘功能评估与实施计划（v88）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; background: #0e1420; color: #e8ecf4; line-height: 1.75; padding: 36px 20px; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 25px; margin-bottom: 8px; }
+  .sub { color: #8a94a6; font-size: 14px; margin-bottom: 30px; border-bottom: 1px solid #232d42; padding-bottom: 16px; }
+  .card { background: #161b26; border: 1px solid #2a3550; border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; }
+  .card h2 { font-size: 16px; color: #6ea8ff; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p, .card li { font-size: 14px; color: #c8d0dd; }
+  ul, ol { padding-left: 22px; }
+  li { margin-bottom: 7px; }
+  b { color: #fff; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0; }
+  .metric { background: #1b2333; border: 1px solid #2a3550; border-radius: 10px; padding: 14px 16px; text-align: center; }
+  .metric .v { font-size: 22px; font-weight: 800; color: #6ea8ff; }
+  .metric .k { font-size: 12px; color: #8a94a6; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { border: 1px solid #2a3550; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #1b2333; color: #6ea8ff; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .b-green { background: #1f9d5522; color: #4ade80; border: 1px solid #1f9d5555; }
+  .b-red { background: #e5484d22; color: #ff6b6b; border: 1px solid #e5484d55; }
+  .b-blue { background: #2a6fe022; color: #6ea8ff; border: 1px solid #2a6fe055; }
+  .b-gray { background: #4a556822; color: #9aa4b5; border: 1px solid #4a556855; }
+  .tag { color: #ffb454; }
+  .step { display: flex; gap: 14px; margin-bottom: 18px; }
+  .marker { flex: 0 0 30px; height: 30px; border-radius: 50%; background: #2a6fe0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; flex: none; }
+  .marker.green { background: #1f9d55; }
+  .step-body { flex: 1; }
+  .step-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .step-text { font-size: 13px; color: #9aa4b5; }
+  .code { background: #0d1320; border: 1px solid #232d42; border-radius: 6px; padding: 10px 14px; font-family: Consolas, monospace; font-size: 12.5px; color: #9fd0ff; margin: 10px 0; overflow-x: auto; white-space: pre; }
+  .warn { background: #3d2c0f; border: 1px solid #8a6d1f; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .ok { background: #0f2b1c; border: 1px solid #1f9d5555; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .mock { background: #10141d; border: 1px solid #2a3550; border-radius: 8px; padding: 12px 16px; font-size: 13px; margin: 8px 0; }
+  .chip { display: inline-block; background: #f0b42918; color: #f0b429; border: 1px solid #5a4a1a; border-radius: 4px; font-size: 11.5px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
+  .ghost { display: inline-block; color: #6b7689; border: 1px dashed #3a465c; border-radius: 4px; font-size: 11.5px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
+  .kbd { background: #1b2333; border: 1px solid #3a465c; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-family: Consolas, monospace; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>日历「当日备忘」功能评估与实施计划</h1>
+  <div class="sub">a-share-heatmap · 拟版本 v88 · 2026-09-13 · 评估结论：可行且强烈推荐，纯前端 + 一个镜像端点，约 150 行、5 个步骤；存储复用股票备注的成熟双写模式，风险接近零</div>
+
+  <div class="card">
+    <h2>核心结论</h2>
+    <p>在日历每天的<b>日期头部</b>支持记录一条当日备忘（≤200 字），备忘文本以<b>金色标签形式常驻显示在日期后面</b>——<b>折叠状态也可见</b>，一眼看到当天重点，不需要展开翻事件列表。数据按日期键存储，完整复用股票备注已验证的<b>「localStorage 即时 + 服务端 JSON 持久」双写模式</b>（v20 备注 / v64 成本价两次落地，含服务端校验、原子写盘、跨浏览器同步），后端只需一个几乎照抄的镜像端点。本需求与 v87 刚落成的搜索、折叠修复正交，无状态冲突。</p>
+    <div class="metrics">
+      <div class="metric"><div class="v">5 步</div><div class="k">实施步骤（v88a~v88e）</div></div>
+      <div class="metric"><div class="v">~150 行</div><div class="k">新增代码量（后端约 45）</div></div>
+      <div class="metric"><div class="v">1 个</div><div class="k">新增端点 /api/calnotes</div></div>
+      <div class="metric"><div class="v">0 项</div><div class="k">新增外部依赖 / 数据源</div></div>
+    </div>
+    <div class="ok">✓ 数据源纪律合规：备忘是用户手动录入的本机数据，不依赖任何外部接口；服务端只落 calnotes.json 一个文件。</div>
+  </div>
+
+  <div class="card">
+    <h2>一、需求定义</h2>
+    <table>
+      <tr><th>项</th><th>说明</th></tr>
+      <tr><td>核心能力</td><td>给日历上的<b>某一天</b>记一条备忘（如「9·15 议息，盘前减仓」「今天只看美国数据」）</td></tr>
+      <tr><td>显示位置</td><td><b>日期头部的日期之后</b>（d-week 旁）：金色小标签「📌 备忘文本」，<b>折叠也显示</b>——这是需求灵魂：不展开就知道当天重点</td></tr>
+      <tr><td>录入方式</td><td>点头部上的「＋ 备忘」幽灵按钮（无备忘时）或点备忘标签本身（有备忘时）→ 弹出编辑器</td></tr>
+      <tr><td>数据模型</td><td><span class="code">{ "2026-09-15": "美联储议息，盘前减仓", "2026-09-18": "四巫日" }</span>与 notes.json 同构的扁平结构：键=日期(10 字符)，值=文本(≤200 字)</td></tr>
+      <tr><td>持久化</td><td>双写：localStorage 即时 + 服务端 calnotes.json（GET/POST /api/calnotes），防清浏览器丢失、多浏览器窗口同步</td></tr>
+      <tr><td>容量约束</td><td>每天 1 条、200 字（与股票备注一致）；无条数焦虑，鼓励只记「当天最重要的一件事」</td></tr>
+      <tr><td>非目标</td><td>多条备忘/富文本/提醒推送/跨日拖拽/历史归档视图</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>二、现状事实（评估依据）</h2>
+    <table>
+      <tr><th>事实</th><th>位置 / 数值</th><th>对本需求的意义</th></tr>
+      <tr><td>股票备注双写模式已两轮验证</td><td>app.js <span class="tag">wlNotesSave/fetchNotesFile</span>（929/918 行），server.py <span class="tag">/api/notes</span>（370-400 行）</td><td>前后端代码可近乎照抄：键长校验 16 字符（日期键 10 字符天然满足）、值截断 200、.tmp + os.replace 原子写、2MB 上限</td></tr>
+      <tr><td>编辑器 UI 与样式现成</td><td>index.html <span class="tag">#noteEditor</span> + .ne-* 类（98-107 行）</td><td>日历编辑器复用同一套 CSS，新增样式趋近于零</td></tr>
+      <tr><td>日期头部结构有空位</td><td>cal-day-head：箭头(14px) + d-date + d-week + <b>d-meta(margin-left:auto)</b>，sticky 定位</td><td>备忘标签插在 d-week 与 d-meta 之间即满足「日期后面」；d-meta 靠右不挤压</td></tr>
+      <tr><td>头部整行点击=折叠切换</td><td>calList 点击委托 closest(".cal-day-head")（app.js 3564 行）</td><td><b>唯一交互冲突点</b>：备忘按钮/标签必须 stopPropagation，否则点备忘会误折叠当天</td></tr>
+      <tr><td>30 秒定时重渲染 / 120 秒重拉</td><td>setInterval 3498/3499 行</td><td>备忘渲染在 calDayHtml 里由状态驱动，重渲染自动继承；编辑器是 calList 之外的浮层，重渲染不打断输入</td></tr>
+      <tr><td>日历窗口约 14 天滚动</td><td>calendar.json 实测 211 条 / 13 天</td><td>掉出窗口的日期备忘自然不显示（数据保留）；需服务端按日期键清理防无限增长</td></tr>
+      <tr><td>清浏览器数据丢档教训</td><td>v57 自选丢失、v64 成本价双写修正</td><td>方案上直接排除纯 localStorage，双写是既定纪律</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>三、方案对比（存储与端点）</h2>
+    <table>
+      <tr><th>方案</th><th>存储</th><th>优点</th><th>缺点</th><th>结论</th></tr>
+      <tr><td><b>A · 纯本地</b></td><td>仅 localStorage</td><td>零后端，最快</td><td>清浏览器数据即丢（项目已两次踩坑并确立双写纪律）</td><td><span class="badge b-red">排除</span></td></tr>
+      <tr><td><b>B · 镜像 notes 模式</b></td><td>localStorage + calnotes.json（GET/POST /api/calnotes）</td><td>与备注/成本价同构；服务端代码照抄 /api/notes 改 3 行；原子写、校验、2MB 防护全套继承</td><td>新增一个端点与一个文件</td><td><span class="badge b-green">推荐</span></td></tr>
+      <tr><td><b>C · 塞进日历数据</b></td><td>并入 calendar.json 或 calmeta.json</td><td>不加新文件</td><td><b>否决级缺陷</b>：calendar.json 由抓取任务每 5 分钟整文件覆盖，用户数据会被冲掉；calmeta.json 是 diff 元数据（含 bootstrapped 状态机），混入用户输入破坏职责边界；且日历文件会随服务重启被重建，不能承载用户资产</td><td><span class="badge b-red">排除</span></td></tr>
+    </table>
+    <p>合并策略沿用股票备注现状：载入时以服务端为准回写本地（单用户本机服务，last-write-wins 足够，与 notes/costs 一致，不引入新的合并复杂度）。</p>
+  </div>
+
+  <div class="card">
+    <h2>四、交互设计（完整状态机）</h2>
+    <table>
+      <tr><th>状态</th><th>呈现</th><th>交互</th></tr>
+      <tr>
+        <td><b>无备忘</b></td>
+        <td>头部 d-week 后显示幽灵按钮 <span class="ghost">＋ 备忘</span>（默认 40% 透明度，头部 hover 时 100%）</td>
+        <td>点击打开编辑器；<b>stopPropagation 不折叠</b>；移动端常显（无 hover），保证可发现性</td>
+      </tr>
+      <tr>
+        <td><b>有备忘 · 展开日</b></td>
+        <td><span class="chip">📌 美联储议息，盘前减仓</span> 金色标签（超 16 字省略号截断，title 悬浮看全文）</td>
+        <td>点击标签打开编辑器（改/删）；点击标签以外头部区域仍正常折叠/展开</td>
+      </tr>
+      <tr>
+        <td><b>有备忘 · 折叠日</b></td>
+        <td><b>标签原样显示在头部</b>（核心价值），同时该日卡片左边框变琥珀色 2px，扫视列表时更快定位</td>
+        <td>同上；折叠/展开不影响备忘</td>
+      </tr>
+      <tr>
+        <td><b>编辑中</b></td>
+        <td>编辑器浮层：标题「9月15日 周一 · 当日备忘」+ textarea（maxlength 200，右下实时字数 37/200）+ 删除/保存按钮；定位在所点头部正下方 8px（越界自动翻转），z-index 100 高于 sticky 头部的 z-index 2</td>
+        <td><span class="kbd">保存</span>按钮或 <span class="kbd">Ctrl+Enter</span> 保存；<span class="kbd">Esc</span> 或 × 关闭（不保存）；<span class="kbd">删除备注</span> 清除并关闭</td>
+      </tr>
+      <tr>
+        <td><b>保存后</b></td>
+        <td>头部标签即时出现（就地重渲染），toast「备忘已保存」；删除后幽灵按钮回归，toast「备忘已删除」</td>
+        <td>双写：localStorage 同步 + POST /api/calnotes 静默后台（失败不打断，与备注一致）</td>
+      </tr>
+      <tr>
+        <td><b>加载时</b></td>
+        <td>先用 localStorage 立即渲染，GET /api/calnotes 返回后以服务端为准覆盖并重渲染（与 fetchNotesFile 同策略）</td>
+        <td>服务不可达静默降级为本地模式</td>
+      </tr>
+    </table>
+    <div class="mock">
+      <b>折叠日效果示意（备忘可见性 = 需求灵魂）：</b><br>
+      <span style="color:#8a94a6">▸</span> <b>9月15日</b> 周二 <span class="chip">📌 议息日，盘前减仓</span> <span style="color:#8a94a6;margin-left:auto">6 条 · 三星 2</span><br>
+      <span style="color:#8a94a6">▸</span> <b>9月18日</b> 周五 <span class="chip">📌 四巫日</span> <span style="color:#8a94a6;margin-left:auto">11 条 · 三星 3</span><br>
+      <span style="color:#8a94a6">▸</span> <b>9月19日</b> 周六 <span class="ghost">＋ 备忘</span> <span style="color:#8a94a6;margin-left:auto">0 条 · 三星 0</span>
+    </div>
+    <ul>
+      <li><b>多行文本</b>：头部标签只显示第一行（换行折为空格），编辑器内保留完整多行——头部是索引不是正文。</li>
+      <li><b>键盘可达</b>：备忘按钮/标签用真实 &lt;button&gt;（可 Tab、Enter 触发）；现有头部 Enter/Space 折叠不受影响。</li>
+      <li><b>移动端</b>：标签 max-width 40vw 截断；编辑器固定屏幕居中（小屏不跟随坐标翻转）。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>五、与既有机制的交互（风险点逐条核对）</h2>
+    <ul>
+      <li><b>头部点击委托误折叠</b>（唯一真实冲突）：备忘控件在最头部点击链路里，必须 <span class="tag">e.stopPropagation()</span>（或委托层 closest 判定备忘控件直接 return）。列为实施步骤独立验收项。</li>
+      <li><b>30s/120s 重渲染</b>：备忘读取 calDayNotes 状态渲染，天然继承；编辑器浮层在 calList 外，重渲染不丢焦点不改内容。保存动作若恰逢重渲染，就地渲染函数与 renderCalendar 幂等无竞态。</li>
+      <li><b>折叠状态（v87 修复）</b>：备忘不写 calExpandedDays、不改变展开规则，<b>刻意不自动展开</b>有备忘的日——「不展开就看到重点」正是需求本体。</li>
+      <li><b>v87 标题搜索叠加</b>：搜索期命中日强制展开，备忘标签照常显示；已知边界——<b>搜索无命中的日整体隐藏，其备忘随之不可见</b>（搜索是事件域操作，可接受，不做特殊处理）；星级/类型过滤把某日事件滤空时该日不渲染，备忘同样暂不可见（已知边界，v1 不为空日渲染壳）。</li>
+      <li><b>XSS</b>：备忘虽是本机输入，仍走 calEsc 转义后注入（与全站渲染纪律一致）。</li>
+      <li><b>窗口滚动 / 孤儿数据</b>：日期掉出 14 天窗口后标签不渲染，数据保留供回看；服务端每次 POST 时清理 45 天前的日期键，文件不会无限膨胀。</li>
+      <li><b>跨午夜</b>：键为绝对日期，无今天/明天漂移问题（与折叠默认规则不同源，正交）。</li>
+      <li><b>sticky 头部与浮层层级</b>：编辑器 z-index 100 &gt; 头部 z-index 2，无遮挡问题；编辑器打开时点击别处头部会切换折叠但不关编辑器（与股票备注行为一致，可接受）。</li>
+      <li><b>服务端校验</b>：键白名单正则 <span class="tag">^\d{4}-\d{2}-\d{2}$</span>（比 notes 的 16 字符截断更严），值 strip + 200 截断，2MB 上限与原子写继承。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>六、实施步骤（拟 v88a~v88e）</h2>
+    <div class="step"><div class="marker">1</div><div class="step-body">
+      <div class="step-title">v88a · 服务端端点（server.py ~45 行）</div>
+      <div class="step-text">CALNOTES_JSON 常量 + GET/POST /api/calnotes（照抄 /api/notes：键日期正则、值 200 截断、2MB 上限、.tmp 原子写、POST 时清理 45 天前键），启动横幅加端点提示。</div>
+    </div></div>
+    <div class="step"><div class="marker">2</div><div class="step-body">
+      <div class="step-title">v88b · 状态与双写（app.js ~30 行）</div>
+      <div class="step-text">calDayNotes 对象 + localStorage 键 cal_day_notes_v1 + calNotesLoad（localStorage 先行、GET 覆盖）+ calNotesSave（本地即时 + POST 静默），挂到初始化序列。</div>
+    </div></div>
+    <div class="step"><div class="marker">3</div><div class="step-body">
+      <div class="step-title">v88c · 头部渲染与点击链路（app.js + index.html ~35 行）</div>
+      <div class="step-text">calDayHtml 头部加备忘槽位：有备忘→金色标签（第一行 16 字截断 + title 全文 + 卡片琥珀左边框），无→幽灵「＋ 备忘」（移动端 CSS 常显）；委托层对备忘控件 stopPropagation；openCalNoteEditor/saveCalNote/deleteCalNote 逻辑。</div>
+    </div></div>
+    <div class="step"><div class="marker">4</div><div class="step-body">
+      <div class="step-title">v88d · 编辑器浮层（index.html + app.js ~30 行）</div>
+      <div class="step-text">复用 .ne-* 样式新建 calNoteEditor（标题带日期/周几/今天标注、textarea 200 + 实时字数、Ctrl+Enter 保存、Esc 关闭），头部下方定位 + 越界翻转 + 移动端居中。</div>
+    </div></div>
+    <div class="step"><div class="marker green">5</div><div class="step-body">
+      <div class="step-title">v88e · 验证（浏览器实测）</div>
+      <div class="step-text">① 加/改/删备忘头部即时更新；② 折叠日备忘可见 + 琥珀边条；③ 点备忘不触发折叠、点头部其余区域正常折叠；④ 30s 重渲染备忘保持、编辑中输入不丢；⑤ 刷新页面与服务端重启后备忘仍在（双写验证：手改 calnotes.json 再 GET）；⑥ XSS 样本 &lt;b&gt;test&lt;/b&gt; 纯文本显示；⑦ 45 天旧键被 POST 清理；⑧ 移动端截断与编辑器居中；⑨ v87 搜索/过滤下备忘表现符合「已知边界」预期。</div>
+    </div></div>
+  </div>
+
+  <div class="card">
+    <h2>七、风险与非目标</h2>
+    <table>
+      <tr><th>项</th><th>等级</th><th>说明与对策</th></tr>
+      <tr><td>备忘点击误触发折叠</td><td><span class="badge b-red">中</span></td><td>唯一交互冲突点，stopPropagation 在步骤 3 单列并作为 v88e 第③项强制验收</td></tr>
+      <tr><td>搜索/过滤下备忘暂不可见</td><td><span class="badge b-blue">低</span></td><td>已知边界（事件域 vs 备注域），v1 接受；若反馈强烈，v1.1 可为「有备忘的日」在过滤后保留壳渲染</td></tr>
+      <tr><td>双写失败静默</td><td><span class="badge b-blue">低</span></td><td>与股票备注同一降级语义（本地可用）；可在抓取失败区复用样式提示，v1 不做</td></tr>
+      <tr><td>多条备忘 / 事件级备注</td><td><span class="badge b-gray">非目标</span></td><td>需求本体是「当天一件事」；事件级备注会让头部索引失焦，如需走自选股备注心智</td></tr>
+      <tr><td>提醒/推送</td><td><span class="badge b-gray">非目标</span></td><td>备忘是静态索引，不做定时提醒；告警体系已有独立通道</td></tr>
+    </table>
+    <div class="ok">✓ 总体结论：模式经过两次落地验证、UI/CSS 复用度高、与 v87 搜索和折叠修复正交，<b>推荐按 v88a~v88e 实施</b>，风险集中在 stopPropagation 一处且验收项明确。</div>
+  </div>
+</div>
+</body>
+</html>

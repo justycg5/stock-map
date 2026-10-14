@@ -95,12 +95,14 @@
   #tooltip .tt-note-ops { margin-top: 4px; }
   #tooltip .tt-note-add, #tooltip .tt-note-edit { color: #5b8def; cursor: pointer; }
   #tooltip .tt-note-del { color: #c96a6a; cursor: pointer; margin-left: 10px; }
-  #noteEditor { position: fixed; z-index: 100; display: block; background: #16202f; border: 1px solid #3b5077; border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.5); width: 260px; }
-  #noteEditor.hidden { display: none; }
+  #noteEditor, #calNoteEditor { position: fixed; z-index: 100; display: block; background: #16202f; border: 1px solid #3b5077; border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.5); width: 260px; }
+  #noteEditor.hidden, #calNoteEditor.hidden { display: none; }
   .ne-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .ne-title { font-weight: 600; font-size: 13px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ne-close { cursor: pointer; color: #7d8ba1; font-size: 15px; margin-left: 8px; }
   #neText { width: 100%; height: 72px; background: #0e1420; color: #dbe4f0; border: 1px solid #2c3d5c; border-radius: 6px; padding: 6px 8px; font-size: 13px; resize: vertical; box-sizing: border-box; }
+  #cneText { width: 100%; height: 72px; background: #0e1420; color: #dbe4f0; border: 1px solid #2c3d5c; border-radius: 6px; padding: 6px 8px; font-size: 13px; resize: vertical; box-sizing: border-box; }
+  .ne-count { text-align: right; font-size: 11px; color: #7d8ba1; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .ne-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
   .ne-btn { border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
   .ne-save { background: #2a5fc4; color: #fff; }
@@ -230,6 +232,12 @@
 .cal-day.cal-col .cal-day-head { border-bottom: none; }
 .cal-day-head .d-date { font-size: 14px; font-weight: 700; }
 .cal-day-head .d-week { font-size: 12.5px; color: var(--muted); }
+.cal-day-head .d-note { flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: rgba(240,180,41,.12); color: var(--gold); border: 1px solid #5a4a1a; border-radius: 4px; font-size: 11.5px; line-height: 1.6; padding: 0 7px; font-family: inherit; cursor: pointer; }
+.cal-day-head .d-note:hover { background: rgba(240,180,41,.24); }
+.cal-day-head .d-note-add { flex: none; background: transparent; color: var(--muted); border: 1px dashed #3a465c; border-radius: 4px; font-size: 11.5px; line-height: 1.6; padding: 0 7px; font-family: inherit; cursor: pointer; opacity: .45; transition: opacity .15s; }
+.cal-day-head:hover .d-note-add, .cal-day-head .d-note-add:focus-visible { opacity: 1; }
+.cal-day-head .d-note-add:hover { color: var(--text); border-color: #55617a; opacity: 1; }
+.cal-day.has-note { box-shadow: inset 2px 0 0 #f0b429; }
 #calDot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--red); margin-left: 5px; vertical-align: 2px; }
 .cal-ev .ttl .ntag, .cal-ev .ntag { font-style: normal; font-weight: 600; color: var(--gold); border: 1px solid #5a4a1a; border-radius: 3px; font-size: 10px; padding: 0 3px; margin-left: 4px; vertical-align: 1px; }
 .cal-ev .ttl .ntag.up, .cal-ev .ntag.up { color: #ff9d5c; border-color: #6b4226; }
@@ -467,6 +475,8 @@
   .cal-searchbox { flex: 1 1 100%; }
   .cal-search { flex: 1; }
   #calSearch { width: 100%; }
+  .cal-day-head .d-note { max-width: 40vw; }
+  .cal-day-head .d-note-add { opacity: 1; }
   #rangeSel { order: 9; flex-basis: 100%; }
   #btnWl, #btnAlert { font-size: 0; padding: 6px 10px; white-space: nowrap; }
   #btnWl::before { content: "★"; font-size: 15px; }
@@ -656,21 +666,36 @@
     <button id="neSave" class="ne-btn ne-save">保存</button>
   </div>
 </div>
+<div id="calNoteEditor" class="hidden">
+  <div class="ne-head"><span class="ne-title" id="cneTitle"></span><span class="ne-close" id="cneClose">×</span></div>
+  <textarea id="cneText" maxlength="200" placeholder="记录当天最重要的事…（200 字内）"></textarea>
+  <div class="ne-count" id="cneCount">0/200</div>
+  <div class="ne-actions">
+    <button id="cneDel" class="ne-btn ne-del">删除备忘</button>
+    <button id="cneSave" class="ne-btn ne-save">保存</button>
+  </div>
+</div>
 <div id="wlTip" class="hidden"></div>
 <div id="alertPanel" class="hidden">
   <div class="wl-head"><span>🔔 告警规则</span><button id="alertClose" title="收起">×</button></div>
   <div class="wh-box" id="awhBox">
-    <div class="wh-top"><span class="wh-title">股价告警推送</span><span id="awhStatus" class="wh-status">加载中…</span></div>
+    <div class="wh-top"><span class="wh-title">期货告警群推送</span><span id="awhStatus" class="wh-status">加载中…</span></div>
     <div class="wh-row">
-      <input id="awhInput" placeholder="企业微信群机器人 webhook 地址" autocomplete="off" spellcheck="false">
-      <button id="awhSave" title="保存股价告警 webhook">保存</button>
-      <button id="awhTest" title="向告警群发送测试消息">测试</button>
+      <input id="awhInput" placeholder="期货告警群机器人 webhook 地址（现有群）" autocomplete="off" spellcheck="false">
+      <button id="awhSave" title="保存期货告警群 webhook">保存</button>
+      <button id="awhTest" title="向期货告警群发送测试消息">测试</button>
+    </div>
+    <div class="wh-top"><span class="wh-title">股票告警群推送</span><span id="swhStatus" class="wh-status">加载中…</span></div>
+    <div class="wh-row">
+      <input id="swhInput" placeholder="股票告警群机器人 webhook 地址（新增群）" autocomplete="off" spellcheck="false">
+      <button id="swhSave" title="保存股票告警群 webhook">保存</button>
+      <button id="swhTest" title="向股票告警群发送测试消息">测试</button>
     </div>
   </div>
   <div class="al-sub" id="alertStatus" style="display:none"></div>
   <div id="alertList"></div>
   <div class="al-foot">
-    <button id="alertTest" class="wl-btn" title="向企业微信群发送一条测试消息">发送测试</button>
+    <button id="alertTest" class="wl-btn" title="向期货告警群发送测试消息">发送测试</button>
     <button id="alertAdd" class="wl-btn">＋ 添加告警</button>
   </div>
 </div>
@@ -724,6 +749,6 @@
     <button class="wm-item wm-cancel" data-act="close">取消</button>
   </div>
 </div>
-<script src="app.js?v=120"></script>
+<script src="app.js?v=123"></script>
 </body>
 </html>

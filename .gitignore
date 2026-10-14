@@ -4,6 +4,7 @@
 .env.local.test
 webhook.json
 monitor_webhook.json
+stock_webhook.json
 calpush.json
 
 # ===== 运行时生成数据（fetch_data.py / server.py 产生，可重新抓取/再生） =====

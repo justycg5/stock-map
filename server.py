@@ -29,6 +29,8 @@ NOTES_JSON = os.path.join(BASE, "notes.json")
 WATCHLIST_JSON = os.path.join(BASE, "watchlist.json")
 WATCHLIST_MAX_BYTES = 512 * 1024
 NOTES_MAX_BYTES = 2 * 1024 * 1024
+CALNOTES_JSON = os.path.join(BASE, "calnotes.json")   # 日历当日备忘（键=日期，值=文本）
+CALNOTES_MAX_BYTES = 256 * 1024
 COSTS_JSON = os.path.join(BASE, "costs.json")
 COSTS_MAX_BYTES = 512 * 1024
 ALERTS_JSON = os.path.join(BASE, "alerts.json")
@@ -36,6 +38,7 @@ WEBHOOK_JSON = os.path.join(BASE, "webhook.json")
 
 MONITOR_JSON = os.path.join(BASE, "monitor.json")
 MONITOR_WEBHOOK_JSON = os.path.join(BASE, "monitor_webhook.json")
+STOCK_WEBHOOK_JSON = os.path.join(BASE, "stock_webhook.json")  # v91：股票告警独立群（期货告警群继续用 webhook.json）
 MONITOR_INTERVAL_S = 60          # 公告轮询周期（秒）
 MONITOR_DAYS = 7                 # 公告查询窗口（天）
 MONITOR_MAX_BYTES = 512 * 1024
@@ -125,6 +128,24 @@ REFETCH_COOLDOWN_S = 600        # 手动重抓冷却（秒）
 _last_refetch = {"ts": 0}       # 手动重抓时间戳
 _refetch_lock = threading.Lock()  # 重抓并发锁（防自动/手动同时抓）
 
+# 快照触发窗口与重试上限（2026-09-24 修复）：
+# Bug1 原逻辑 now>=11:32 即触发，18:30 启动也会打"午休快照"；Bug2 失败后 600s 无限重试，
+# 东财风控期一天 59 次触发、每次都在刷新封禁窗口，形成"越封越抓、越抓越封"死循环。
+SNAPSHOT_MAX_ATTEMPTS = 5      # 单快照点单日最多尝试次数（含失败），耗尽等下一个事件点
+LUNCH_WINDOW_END = (13, 30)    # 午休快照触发窗口截止
+CLOSE_WINDOW_END = (16, 30)    # 收盘快照触发窗口截止
+_snap_attempts = {"date": None, "lunch": 0, "close": 0}
+
+
+def _snap_attempt_slot(key):
+    # 当日内某快照点已尝试次数（跨日自动清零；daily_refetch_loop 单线程调用，无需加锁）
+    today = time.strftime("%Y-%m-%d")
+    if _snap_attempts["date"] != today:
+        _snap_attempts["date"] = today
+        _snap_attempts["lunch"] = 0
+        _snap_attempts["close"] = 0
+    return _snap_attempts[key]
+
 # v100 gzip 结果缓存：key=(绝对路径, mtime_ns, size)。文件原子替换（os.replace）后 mtime 变化自动失效
 _GZ_CACHE = {}
 _GZ_CACHE_MAX = 16
@@ -156,6 +177,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_fut_quotes(self):
+        """期货实时（v104）：代理新浪 hq 批量行情，盘中实时彻底不走东财。
+        浏览器不直连外网源：东财/新浪均无 CORS 头，只能服务端代理。"""
+        try:
+            data, fresh = _sina_fut_quotes()
+        except Exception as e:
+            return self._json({"ok": False, "msg": str(e)[:80], "quotes": {}})
+        return self._json({"ok": True, "fresh": fresh, "ts": int(_FUT_QUOTE_MEM["ts"]), "quotes": data})
 
     def _handle_version(self):
         """data.json 版本探测（文件 mtime，秒级）。
@@ -231,6 +261,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_costs_get()
         if path == "/api/notes":
             return self._handle_notes_get()
+        if path == "/api/calnotes":
+            return self._handle_calnotes_get()
         if path == "/api/watchlist":
             return self._handle_watchlist_get()
         if path == "/api/refetch":
@@ -239,12 +271,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_alerts_get()
         if path == "/api/alertcfg":
             return self._handle_alertcfg_get()
+        if path == "/api/stockalertcfg":
+            return self._handle_stockalertcfg_get()
         if path == "/api/monitor":
             return self._handle_monitor_get()
         if path == "/api/monitorcfg":
             return self._handle_monitorcfg_get()
         if path == "/api/rare_earth_refetch":
             return self._handle_rare_earth_refetch()
+        if path == "/api/fut_quotes":
+            return self._handle_fut_quotes()
         if path == "/api/f10":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             code = (qs.get("code") or [""])[0]
@@ -260,12 +296,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_costs_post()
         if path == "/api/notes":
             return self._handle_notes_post()
+        if path == "/api/calnotes":
+            return self._handle_calnotes_post()
         if path == "/api/watchlist":
             return self._handle_watchlist_post()
         if path == "/api/alerts":
             return self._handle_alerts_post()
         if path == "/api/alertcfg":
             return self._handle_alertcfg_post()
+        if path == "/api/stockalertcfg":
+            return self._handle_stockalertcfg_post()
         if path == "/api/alerttest":
             return self._handle_alerttest()
         if path == "/api/monitor":
@@ -395,6 +435,43 @@ class Handler(SimpleHTTPRequestHandler):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(clean, f, ensure_ascii=False, indent=1)
             os.replace(tmp, NOTES_JSON)
+            return self._json({"ok": True, "count": len(clean)})
+        except Exception as e:
+            return self._json({"ok": False, "msg": str(e)[:200]})
+
+    def _handle_calnotes_get(self):
+        """日历当日备忘读取（键=YYYY-MM-DD，值=文本）。"""
+        try:
+            with open(CALNOTES_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        return self._json({"ok": True, "notes": data})
+
+    def _handle_calnotes_post(self):
+        """日历当日备忘写入：键限日期格式，值截断 200 字；清理 45 天前的旧键防膨胀。"""
+        try:
+            ln = int(self.headers.get("Content-Length", 0) or 0)
+            if ln <= 0 or ln > CALNOTES_MAX_BYTES:
+                return self._json({"ok": False, "msg": "数据过大或为空"})
+            obj = json.loads(self.rfile.read(ln).decode("utf-8"))
+            if not isinstance(obj, dict):
+                return self._json({"ok": False, "msg": "格式错误"})
+            clean = {}
+            for k, v in obj.items():
+                k = str(k)
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", k):
+                    continue
+                if isinstance(v, str) and v.strip():
+                    clean[k] = v.strip()[:200]
+            cutoff = (datetime.date.today() - datetime.timedelta(days=45)).isoformat()
+            clean = {k: v for k, v in clean.items() if k >= cutoff}
+            tmp = CALNOTES_JSON + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(clean, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, CALNOTES_JSON)
             return self._json({"ok": True, "count": len(clean)})
         except Exception as e:
             return self._json({"ok": False, "msg": str(e)[:200]})
@@ -539,7 +616,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:
             return self._json({"ok": False, "msg": str(e)[:200]})
 
-    # ---------- /api/alerttest ----------
+    # ---------- /api/alerttest（v91：mkt=fut 期货群 / mkt=stock 股票群） ----------
     def _handle_alerttest(self):
         try:
             ln = int(self.headers.get("Content-Length", 0) or 0)
@@ -548,15 +625,48 @@ class Handler(SimpleHTTPRequestHandler):
                 body = self.rfile.read(ln).decode("utf-8")
         except Exception:
             body = ""
-        msg = "【测试】股价告警系统已就绪\n时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S")
+        mkt = "fut"
+        custom = None
         if body:
             try:
                 obj = json.loads(body)
-                if isinstance(obj, dict) and obj.get("msg"):
-                    msg = "【测试】%s" % str(obj["msg"])[:200]
+                if isinstance(obj, dict):
+                    if str(obj.get("mkt") or "").strip().lower() == "stock":
+                        mkt = "stock"
+                    if obj.get("msg"):
+                        custom = str(obj["msg"])[:200]
             except Exception:
                 pass
-        ok, err = _send_webhook(msg)
+        label = "股票" if mkt == "stock" else "期货"
+        if custom:
+            msg = "【测试】%s（%s群）" % (custom, label)
+        else:
+            msg = "【测试】%s告警通道已就绪\n时间：%s" % (label, time.strftime("%Y-%m-%d %H:%M:%S"))
+        if mkt == "stock":
+            ok, err = _send_stock_webhook(msg)
+        else:
+            ok, err = _send_webhook(msg)
+        return self._json({"ok": ok, "msg": err})
+
+    # ---------- /api/stockalertcfg (v91 股票告警独立群 webhook 配置) ----------
+    def _handle_stockalertcfg_get(self):
+        cfg = _load_json(STOCK_WEBHOOK_JSON, {}) or {}
+        url = cfg.get("webhook", "") or ""
+        return self._json({"ok": True, "cfg": {"webhook": _mask_webhook(url), "hasKey": bool(url)}})
+
+    def _handle_stockalertcfg_post(self):
+        try:
+            ln = int(self.headers.get("Content-Length", 0) or 0)
+            if ln <= 0 or ln > 8192:
+                return self._json({"ok": False, "msg": "数据过大或为空"})
+            obj = json.loads(self.rfile.read(ln).decode("utf-8"))
+            if not isinstance(obj, dict):
+                return self._json({"ok": False, "msg": "格式错误"})
+            w = (obj.get("webhook") or "").strip()
+            _save_json(STOCK_WEBHOOK_JSON, {"webhook": w})
+            return self._json({"ok": True, "hasKey": bool(w)})
+        except Exception as e:
+            return self._json({"ok": False, "msg": str(e)[:200]})
 
     # ---------- /api/monitorcfg (公告监控 webhook 配置) ----------
     def _handle_monitorcfg_get(self):
@@ -692,13 +802,85 @@ def _mask_webhook(url):
         return head + "key=" + key[:4] + "****"
     return url[:40] + "****"
 
-def _send_webhook(text, retries=2):
-    cfg = _load_json(WEBHOOK_JSON, {}) or {}
-    url = cfg.get("webhook", "") or ""
+# ===== v92 告警备源：东财 ulist 被风控时降级腾讯(股票)/新浪(股票+期货) =====
+# 东财 ALERT_FIELDS 字段序：f12,f14,f2,f3,f4,f109,f160,f110,f24,f25
+#                          代码,名称,现价,涨跌幅,涨跌额,5日,10日,20日,60日,YTD
+# 2026-09-24 实测：腾讯 qt.gtimg 不支持 nf_/qh_/hf_ 期货代码（全部 pv_none_match），期货备源只有新浪
+SINA_FUT_MAP = {
+    "rbm": "nf_RB0", "im": "nf_I0", "jm": "nf_J0", "cum": "nf_CU0", "alm": "nf_AL0",
+    "aum": "nf_AU0", "agm": "nf_AG0", "lcm": "nf_LC0", "psm": "nf_PS0",
+    # scm/lhm 新浪无对应代码（实测返回空），这些品种备源缺失
+    "B00Y": "hf_OIL",
+}
+_SINA_NF_IDX = {"price": 8, "prev": 10}   # nf_：8=最新价，10=昨结算（涨跌幅基准）
+_SINA_HF_IDX = {"price": 0, "prev": 7}    # hf_：0=最新价，7=昨收
+
+
+def _http_get_raw(url, headers, timeout=10):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _backup_quotes_stock(codes):
+    """腾讯批量行情 → {code: {name,price,pct,chg}}。字段位：1名称 2代码 3现价 4昨收 31涨跌 32涨跌幅"""
+    out = {}
+    if not codes:
+        return out
+    q = ",".join(("sh" if c.startswith("6") else "sz") + c for c in codes)
+    try:
+        body = _http_get_raw("https://qt.gtimg.cn/q=" + q, {"User-Agent": "Mozilla/5.0"}).decode("gbk", "replace")
+    except Exception:
+        return out
+    for m in re.finditer(r'v_(?:sh|sz)(\d{6})="([^"]*)"', body):
+        f = m.group(2).split("~")
+        if len(f) > 32:
+            try:
+                out[m.group(1)] = {"name": f[1], "price": float(f[3]),
+                                   "pct": float(f[32]), "chg": float(f[31])}
+            except (ValueError, IndexError):
+                continue
+    return out
+
+
+def _backup_quotes_fut(codes):
+    """新浪期货连续合约 → {code: {name,price}}。涨跌幅需自算（拿昨结算），这里只给现价。"""
+    out = {}
+    sina_map = {c: SINA_FUT_MAP[c] for c in codes if c in SINA_FUT_MAP}
+    if sina_map:
+        q = ",".join(sina_map.values())
+        try:
+            body = _http_get_raw("https://hq.sinajs.cn/list=" + q,
+                                 {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}).decode("gbk", "replace")
+        except Exception:
+            body = ""
+        rev = {v: k for k, v in sina_map.items()}
+        for m in re.finditer(r'hq_str_(nf_|hf_)(\w+)="([^"]*)"', body):
+            code = rev.get(m.group(1) + m.group(2))
+            f = m.group(3).split(",")
+            if not code or not f or f[0] in ("", "0.000"):
+                continue
+            idx = _SINA_HF_IDX if m.group(1) == "hf_" else _SINA_NF_IDX
+            try:
+                price = float(f[idx["price"]])
+                prev = float(f[idx["prev"]]) if len(f) > idx["prev"] else 0.0
+                pct = round((price / prev - 1) * 100, 2) if price > 0 and prev > 0 else None
+                out[code] = {"name": (f[13] if m.group(1) == "hf_" and len(f) > 13 else f[0]),
+                             "price": price, "pct": pct,
+                             "chg": round(price - prev, 3) if pct is not None else None}
+            except (ValueError, IndexError):
+                continue
+    # 2026-09-24 实测：scm(多晶硅)/lhm(生猪) 新浪无对应连续代码，腾讯也不支持期货，
+    # 这些品种备源缺失——备源轮里跳过（等东财恢复后自动回归主源）
+    return out
+
+
+def _send_webhook_url_cfg(url, text, at_all=False, retries=2):
+    """向指定 webhook 发送文本消息（v91 告警双通道共用底层）。"""
     if not url:
         return False, "未配置 webhook"
     payload = {"msgtype": "text", "text": {"content": text}}
-    if cfg.get("atAll"):
+    if at_all:
         payload["text"]["mentioned_list"] = ["@all"]
     for i in range(retries + 1):
         try:
@@ -714,6 +896,37 @@ def _send_webhook(text, retries=2):
                 return False, str(e)
             time.sleep(1)
     return False, "unknown"
+
+
+def _send_webhook(text, retries=2):
+    """期货告警群（webhook.json；v91 起与股票群分通道，历史函数名保留）"""
+    cfg = _load_json(WEBHOOK_JSON, {}) or {}
+    url = cfg.get("webhook", "") or ""
+    return _send_webhook_url_cfg(url, text, at_all=bool(cfg.get("atAll")), retries=retries)
+
+
+def _send_stock_webhook(text, retries=2):
+    """股票告警群（stock_webhook.json，v91 双通道拆分）"""
+    cfg = _load_json(STOCK_WEBHOOK_JSON, {}) or {}
+    url = cfg.get("webhook", "") or ""
+    return _send_webhook_url_cfg(url, text, at_all=bool(cfg.get("atAll")), retries=retries)
+
+
+def _alert_channel(rule, code):
+    """告警路由：返回 (发送函数, 渠道名)。三层判定：
+    1) mkt 字段（前端保存规则时写入 stock/fut）；
+    2) secid/代码形态（6位纯数字=股票，市场前缀+字母码=期货）；
+    3) 都判不出 → 期货群（旧 webhook.json），宁可错投不丢推送。
+    """
+    mkt = str((rule or {}).get("mkt") or "").strip().lower()
+    sid = str((rule or {}).get("secid") or "").strip().lower()
+    if mkt == "stock":
+        return _send_stock_webhook, "股票群"
+    if mkt == "fut":
+        return _send_webhook, "期货群"
+    if re.match(r"^[01]\.[0-9]{6}$", sid) or (not sid and re.match(r"^[0-9]{6}$", str(code or ""))):
+        return _send_stock_webhook, "股票群"
+    return _send_webhook, "期货群"
 
 def _fmt_num(v, is_pct=False):
     if v is None:
@@ -753,6 +966,8 @@ def _alert_reset_msg(name, code, cur, rule):
     lines.append("时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S"))
     return "\n".join(lines)
 
+_ALERT_SRC_LOG = {"ts": 0.0}   # 告警主源成功日志节流（60s 一条，防 log.log 刷屏）
+
 def _check_alerts():
     alerts = _load_json(ALERTS_JSON, {})
     if not isinstance(alerts, dict) or not alerts:
@@ -770,16 +985,72 @@ def _check_alerts():
                 break
     if not secids:
         return
-    url = "https://push2delay.eastmoney.com/api/qt/ulist.np/get?secids=" + ",".join(secids) +           "&fields=" + ALERT_FIELDS + "&fltt=2&invt=2&np=1&pn=1&pz=" + str(len(secids))
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            j = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return
-    arr = (j.get("data") or {}).get("diff") or []
-    if not isinstance(arr, list) or not arr:
-        return
+    # v104.1 主源切换（盘中实时不走东财）：腾讯(股票) + 新浪缓存(期货)为主，东财降为兜底。
+    st_codes = sorted({str(c) for c in alerts if re.match(r"^[0-9]{6}$", str(c))})
+    fut_codes = sorted({str(r.get("secid", "").split(".")[-1])
+                        for rules in alerts.values() for r in rules
+                        if isinstance(r, dict) and r.get("enabled")
+                        and "." in str(r.get("secid", ""))
+                        and not re.match(r"^[01]\.", str(r.get("secid", "")))})
+    arr = None
+    # 主源1：腾讯批量（股票，ACAO=* 无风控问题，字段 1名称 3现价 31涨跌 32pct）
+    if st_codes:
+        try:
+            tq = ",".join(("sh" if c.startswith(("6", "9")) else "sz") + c for c in st_codes)
+            body = _http_get_raw("https://qt.gtimg.cn/q=" + tq,
+                                 {"User-Agent": "Mozilla/5.0"}, timeout=8).decode("gbk", "replace")
+            rows = []
+            for m in re.finditer(r'v_(?:sh|sz|bj)(\d{6})="([^"]*)"', body):
+                f = m.group(2).split("~")
+                if len(f) > 32 and f[1]:
+                    try:
+                        rows.append({"f12": m.group(1), "f14": f[1],
+                                     "f2": float(f[3]), "f3": float(f[32]),
+                                     "f4": float(f[31]) if f[31] else None})
+                    except Exception:
+                        pass
+            if rows:
+                arr = rows
+        except Exception:
+            arr = None
+    # 主源2：新浪期货缓存（今天建的 _sina_fut_quotes，期货告警共用）
+    if fut_codes:
+        try:
+            fq, fresh = _sina_fut_quotes()
+        except Exception:
+            fq, fresh = {}, False
+        for c in fut_codes:
+            v = fq.get(c.lower())
+            if v:
+                arr = arr or []
+                arr.append({"f12": c, "f14": v.get("name"), "f2": v.get("price"),
+                            "f3": v.get("pct"), "f4": v.get("chg")})
+    if arr and time.time() - _ALERT_SRC_LOG["ts"] >= 60:
+        _ALERT_SRC_LOG["ts"] = time.time()
+        print("[告警主源] 腾讯/新浪取 %d 只（东财未请求）" % len(arr), flush=True)
+    if not arr:
+        # 兜底：腾讯+新浪都失败才碰东财（原 v92 路径）
+        url = "https://push2delay.eastmoney.com/api/qt/ulist.np/get?secids=" + ",".join(secids) +               "&fields=" + ALERT_FIELDS + "&fltt=2&invt=2&np=1&pn=1&pz=" + str(len(secids))
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                j = json.loads(resp.read().decode("utf-8"))
+            arr = (j.get("data") or {}).get("diff") or []
+            if not isinstance(arr, list) or not arr:
+                arr = None
+        except Exception:
+            arr = None
+        if arr is None:
+            bq = _backup_quotes_stock(st_codes)
+            bq.update(_backup_quotes_fut(fut_codes))
+            if not bq:
+                print("[告警兜底] 主源与东财均失败，本轮跳过", flush=True)
+                return
+            arr = [{"f12": c, "f14": v.get("name"), "f2": v.get("price"),
+                    "f3": v.get("pct"), "f4": v.get("chg")} for c, v in bq.items()]
+            print("[告警兜底] 东财ulist失败，已用腾讯/新浪备源取 %d 只" % len(arr), flush=True)
+        else:
+            print("[告警兜底] 主源失败，已回退东财取 %d 只" % len(arr), flush=True)
     by_code = {}
     for x in arr:
         by_code[str(x.get("f12")).lower()] = x
@@ -825,9 +1096,10 @@ def _check_alerts():
                     rule["state"] = "idle"
                     rule["resetAt"] = now
                     # v84.1：状态恢复通知（价格回到触发范围之外）
-                    ok_r, err_r = _send_webhook(_alert_reset_msg(name, str(code), cur, rule))
+                    send_fn, ch = _alert_channel(rule, code)
+                    ok_r, err_r = send_fn(_alert_reset_msg(name, str(code), cur, rule))
                     if not ok_r:
-                        print("[股价告警] 恢复通知推送失败 %s: %s" % (code, err_r), flush=True)
+                        print("[股价告警] 恢复通知推送失败(%s) %s: %s" % (ch, code, err_r), flush=True)
                     changed = True
             else:
                 try:
@@ -835,7 +1107,10 @@ def _check_alerts():
                 except Exception:
                     last_reset = 0
                 if hit and (now - last_reset) >= cooldown:
-                    ok, msg = _send_webhook(_alert_msg(name, str(code), cur, rule))
+                    send_fn, ch = _alert_channel(rule, code)
+                    ok, msg = send_fn(_alert_msg(name, str(code), cur, rule))
+                    if not ok:
+                        print("[股价告警] 触发推送失败(%s) %s: %s" % (ch, code, msg), flush=True)
                     rule["state"] = "fired"
                     rule["firedAt"] = now
                     rule["lastErr"] = None if ok else msg
@@ -1583,8 +1858,9 @@ def _refetch_force():
             return (False, "抓取冷却中，%.0f 秒后再试" % left, int(left))
         print("[手动重抓] 开始抓取全市场数据…", flush=True)
         r = subprocess.run([sys.executable, "fetch_data.py"], cwd=BASE,
-                           capture_output=True, text=True, timeout=900,
-                           encoding="utf-8", errors="replace")
+                           capture_output=True, text=True, timeout=960,   # v105: 2400→960 快失败（fetch_data 预算 900s），恢复权交给 180s 补抓
+                           encoding="utf-8", errors="replace",
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         if r.returncode == 0:
             _last_refetch["ts"] = time.time()
             print("[手动重抓] 完成 → data.json / global.json / futures.json", flush=True)
@@ -1608,8 +1884,9 @@ def _refetch_if_needed():
     try:
         print("[数据自动刷新] 开始抓取全市场数据…", flush=True)
         r = subprocess.run([sys.executable, "fetch_data.py"], cwd=BASE,
-                           capture_output=True, text=True, timeout=900,
-                           encoding="utf-8", errors="replace")
+                           capture_output=True, text=True, timeout=960,   # v105: 2400→960 快失败（fetch_data 预算 900s），恢复权交给 180s 补抓
+                           encoding="utf-8", errors="replace",
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         if r.returncode == 0:
             print("[数据自动刷新] 完成 → data.json / global.json / futures.json", flush=True)
         else:
@@ -1634,12 +1911,16 @@ def _next_weekday_at(now, h, m):
 
 
 def _snapshot_due_unfulfilled(now):
-    # 快照时刻已过但 data.json 仍缺（多为抓取失败）→ 需短间隔重试，而非干等下一个事件点
+    # 快照时刻已过但 data.json 仍缺（多为抓取失败）→ 窗口内短间隔重试；窗口外/次数耗尽 → 等下一事件点
     if now.weekday() >= 5:
         return False
-    if now >= _at_today(now, *LUNCH_REFETCH_AT) and not _refetched_after(*LUNCH_REFETCH_AT):
+    if (_at_today(now, *LUNCH_REFETCH_AT) <= now <= _at_today(now, *LUNCH_WINDOW_END)
+            and not _refetched_after(*LUNCH_REFETCH_AT)
+            and _snap_attempt_slot("lunch") < SNAPSHOT_MAX_ATTEMPTS):
         return True
-    if now >= _at_today(now, *REFETCH_AT) and not _refetched_after(*REFETCH_AT):
+    if (_at_today(now, *REFETCH_AT) <= now <= _at_today(now, *CLOSE_WINDOW_END)
+            and not _refetched_after(*REFETCH_AT)
+            and _snap_attempt_slot("close") < SNAPSHOT_MAX_ATTEMPTS):
         return True
     return False
 
@@ -1649,7 +1930,7 @@ def _refetch_wake_wait():
     # 上限 3600s 心跳兜底（失败重算/时钟漂移）。触发时刻不再随服务启动相位漂移（v96 前 11:32 快照
     # 可能拖到 12:03 才触发，正是午间看盘时段显示昨日收盘价的根因）。
     if _snapshot_due_unfulfilled(datetime.datetime.now()):
-        return 600
+        return 180   # v105: 600→180 快照未完成时 3 分钟补抓（配合 fetch_data 900s 快失败）
     now = datetime.datetime.now()
     nxt = min(_next_weekday_at(now, *LUNCH_REFETCH_AT), _next_weekday_at(now, *REFETCH_AT))
     return max(60, min((nxt - now).total_seconds(), 3600))
@@ -1659,13 +1940,21 @@ def daily_refetch_loop():
     while True:
         try:
             now = datetime.datetime.now()
-            # 触发点 1：交易日 11:32 午休快照（上午收盘后；周末跳过；幂等=当天 11:32 后已抓则跳过）
-            if now.weekday() < 5 and now >= _at_today(now, *LUNCH_REFETCH_AT) and not _refetched_after(*LUNCH_REFETCH_AT):
-                print("[午休快照] 触发抓取（交易日 %02d:%02d）" % LUNCH_REFETCH_AT, flush=True)
+            # 触发点 1：交易日 11:32 午休快照（窗口 11:32-13:30；幂等=当天 11:32 后已抓则跳过；每日最多 5 次）
+            if (now.weekday() < 5 and _at_today(now, *LUNCH_REFETCH_AT) <= now <= _at_today(now, *LUNCH_WINDOW_END)
+                    and not _refetched_after(*LUNCH_REFETCH_AT)
+                    and _snap_attempt_slot("lunch") < SNAPSHOT_MAX_ATTEMPTS):
+                print("[%s] [午休快照] 触发抓取（第 %d/%d 次）" % (
+                    time.strftime("%H:%M:%S"), _snap_attempts["lunch"] + 1, SNAPSHOT_MAX_ATTEMPTS), flush=True)
+                _snap_attempts["lunch"] += 1
                 _refetch_if_needed_lunch()
-            # 触发点 2：交易日 15:05 收盘快照（周末跳过——v96 前周六 15:05 仍会空抓一次；幂等=当天 15:05 后已抓则跳过）
-            if now.weekday() < 5 and now >= _at_today(now, *REFETCH_AT) and not _refetched_after(*REFETCH_AT):
-                print("[数据自动刷新] 触发抓取（交易日 %02d:%02d）" % REFETCH_AT, flush=True)
+            # 触发点 2：交易日 15:05 收盘快照（窗口 15:05-16:30；幂等=当天 15:05 后已抓则跳过；每日最多 5 次）
+            if (now.weekday() < 5 and _at_today(now, *REFETCH_AT) <= now <= _at_today(now, *CLOSE_WINDOW_END)
+                    and not _refetched_after(*REFETCH_AT)
+                    and _snap_attempt_slot("close") < SNAPSHOT_MAX_ATTEMPTS):
+                print("[%s] [数据自动刷新] 触发抓取（第 %d/%d 次）" % (
+                    time.strftime("%H:%M:%S"), _snap_attempts["close"] + 1, SNAPSHOT_MAX_ATTEMPTS), flush=True)
+                _snap_attempts["close"] += 1
                 _refetch_if_needed()
             time.sleep(_refetch_wake_wait())
         except Exception:
@@ -1678,8 +1967,9 @@ def _refetch_if_needed_lunch():
         try:
             print("[午休快照] 开始抓取全市场数据…", flush=True)
             r = subprocess.run([sys.executable, "fetch_data.py"], cwd=BASE,
-                               capture_output=True, text=True, timeout=900,
-                               encoding="utf-8", errors="replace")
+                               capture_output=True, text=True, timeout=960,   # v105: 2400→960 快失败（fetch_data 预算 900s），恢复权交给 180s 补抓
+                               encoding="utf-8", errors="replace",
+                               env=dict(os.environ, PYTHONIOENCODING="utf-8"))
             if r.returncode == 0:
                 print("[午休快照] 完成 → data.json / global.json / futures.json", flush=True)
             else:
@@ -1851,6 +2141,83 @@ def _te_loop():
             print("[TE轮询] 异常: %s" % e, flush=True)
         time.sleep(TE_LOOP_S)
 
+# ========== 期货实时备源代理（v104：盘中实时脱离东财） ==========
+# 背景：东财 ulist 无 CORS 头（浏览器 fetch 结构性失败）+ 本机 IP 对东财长期风控（告警日志常年切备源）。
+# 前端期货 8s 实时改走 /api/fut_quotes → 新浪 hq 单请求批量；快照层 fetch_data.py 维持东财不变。
+# 覆盖位实测（2026-10-12）：商品 nf_ 44 字段 价=8 昨结=10；股指/国债 nf_ 50 字段 价=0 昨结=14；
+# 外盘 hf_ 15 字段 价=0 昨收=7。腾讯期货 nf_/hf_ 实测全空，期货仅新浪单源可用。
+_SINA_FUT_HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
+_FUT_SINA_MAP = {
+    # (新浪代码, 类型, 展示名)——名字用于告警推送标题（v104.2 修复 B00Y(B00Y)）
+    "rbm": ("nf_RB0", "nf", "螺纹钢"), "im": ("nf_I0", "nf", "铁矿石"), "jm": ("nf_J0", "nf", "焦炭"),
+    "cum": ("nf_CU0", "nf", "沪铜"), "alm": ("nf_AL0", "nf", "沪铝"), "aum": ("nf_AU0", "nf", "沪金"),
+    "agm": ("nf_AG0", "nf", "沪银"), "lcm": ("nf_LC0", "nf", "碳酸锂"), "psm": ("nf_PS0", "nf", "多晶硅"),
+    "scm": ("nf_SC0", "nf", "原油"), "lhm": ("nf_LH0", "nf", "生猪"),
+    "cm": ("nf_C0", "nf", "玉米"), "mm": ("nf_M0", "nf", "豆粕"), "TAM": ("nf_TA0", "nf", "PTA"),
+    "ppm": ("nf_PP0", "nf", "聚丙烯"), "CFM": ("nf_CF0", "nf", "棉花"), "SRM": ("nf_SR0", "nf", "白糖"),
+    "OIM": ("nf_OI0", "nf", "菜油"),
+    "IFM": ("nf_IF0", "if", "沪深300"), "IHM": ("nf_IH0", "if", "上证50"), "ICM": ("nf_IC0", "if", "中证500"),
+    "IMM": ("nf_IM0", "if", "中证1000"), "TM": ("nf_T0", "if", "十年国债"), "TFM": ("nf_TF0", "if", "五年国债"),
+    "TSM": ("nf_TS0", "if", "二年国债"), "TLM": ("nf_TL0", "if", "三十国债"),
+    "GC00Y": ("hf_GC", "hf", "纽约金"), "B00Y": ("hf_OIL", "hf", "布伦特原油"),
+    "LCPT": ("hf_CAD", "hf", "伦敦铜"),
+}
+_FUT_QUOTE_MEM = {"ts": 0.0, "data": {}}
+_FUT_QUOTE_TTL_S = 4       # 内存缓存：多页签共享，新浪侧实际 1 请求/8s
+_FUT_QUOTE_STALE_S = 600   # 新浪失败时最长回退 10 分钟内最近成功值
+_SINA_FUT_LOCK = threading.Lock()
+
+def _sina_fut_quotes():
+    """新浪期货批量 → ({code小写: {price,pct,chg,time}}, fresh)。一次请求覆盖全部映射品种。"""
+    now = time.time()
+    if now - _FUT_QUOTE_MEM["ts"] < _FUT_QUOTE_TTL_S and _FUT_QUOTE_MEM["data"]:
+        return _FUT_QUOTE_MEM["data"], True
+    with _SINA_FUT_LOCK:
+        now = time.time()
+        if now - _FUT_QUOTE_MEM["ts"] < _FUT_QUOTE_TTL_S and _FUT_QUOTE_MEM["data"]:
+            return _FUT_QUOTE_MEM["data"], True
+        rows = {}
+        try:
+            q = ",".join(v[0] for v in _FUT_SINA_MAP.values())
+            body = _http_get_raw("https://hq.sinajs.cn/list=" + q, _SINA_FUT_HEADERS, timeout=8).decode("gbk", "replace")
+            rev = {v[0]: (k, v[1], v[2]) for k, v in _FUT_SINA_MAP.items()}
+            for m in re.finditer(r'hq_str_(nf_|hf_)(\w+)="([^"]*)"', body):
+                hit = rev.get(m.group(1) + m.group(2))
+                if not hit:
+                    continue
+                code, kind, nm = hit
+                f = m.group(3).split(",")
+                if kind == "hf":
+                    ip, ipv, itime = 0, 7, 6
+                elif kind == "if":
+                    ip, ipv, itime = 0, 14, 37
+                else:
+                    ip, ipv, itime = 8, 10, 17   # 商品行无盘中时间位，17=日期
+                try:
+                    price = float(f[ip])
+                except Exception:
+                    continue
+                if price <= 0:
+                    continue
+                prev = 0.0
+                try:
+                    prev = float(f[ipv]) if len(f) > ipv else 0.0
+                except Exception:
+                    prev = 0.0
+                pct = round((price / prev - 1) * 100, 2) if price > 0 and prev > 0 else None
+                chg = round(price - prev, 3) if prev > 0 else None
+                tstr = f[itime] if len(f) > itime else ""
+                rows[code.lower()] = {"price": price, "pct": pct, "chg": chg, "time": tstr, "name": nm}
+        except Exception as e:
+            print("[期货备源代理] 新浪失败: %s" % e, flush=True)
+        if rows:
+            _FUT_QUOTE_MEM["data"] = rows
+            _FUT_QUOTE_MEM["ts"] = now
+            return rows, True
+        if _FUT_QUOTE_MEM["data"] and now - _FUT_QUOTE_MEM["ts"] < _FUT_QUOTE_STALE_S:
+            return _FUT_QUOTE_MEM["data"], False
+        return {}, False
+
 def alert_loop():
     while True:
         try:
@@ -1872,7 +2239,7 @@ if __name__ == "__main__":
     threading.Thread(target=_irm_loop, daemon=True).start()
     threading.Thread(target=_irm_sse_loop, daemon=True).start()
     threading.Thread(target=_te_loop, daemon=True).start()
-    print("A股云图服务: http://127.0.0.1:%d/  (现货更新 /api/update | 手动重抓 /api/refetch | 备注读写 /api/notes | 告警 /api/alerts)" % port)
+    print("A股云图服务: http://127.0.0.1:%d/  (现货更新 /api/update | 手动重抓 /api/refetch | 备注读写 /api/notes | 日历备忘 /api/calnotes | 告警 /api/alerts)" % port)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

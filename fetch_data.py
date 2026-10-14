@@ -16,6 +16,7 @@ A股全市场行情抓取脚本 → data.json
 """
 import json
 import os
+import random
 import sys
 import time
 
@@ -71,11 +72,22 @@ MARKETS = [
     ("创业板", "m:0+t:80"),
     ("科创板", "m:1+t:23"),
 ]
-PAGE_SIZE = 200
-SLEEP = 0.9  # 分页间隔，避免触发风控
+PAGE_SIZE = 100   # 2026-09-23 实测：东财 clist 单页最多返回 100 条（pz=200 也被截成 100），按 100 翻页
+SLEEP = 2.0  # v105: 0.9→2.0 慢速翻页 + 随机抖动（下方 sleep 处生效），压低请求速率避开风控
 INC_BATCH = 100   # 增量模式每批代码数
 INC_SLEEP = 0.35  # 增量模式批次间隔
 
+# 反爬防护（2026-09-23 排查"全量只抓到 100 只"问题引入）：
+# - 请求失败与真空页区分：连接被限流/RST 走长退避重试，不得当成"翻完了"提前 break
+# - 全量结果过少时拒绝覆盖 data.json，保留旧快照（限流期反复重抓只会越抓越少）
+PAGE_FAIL_RETRIES = 4      # v105: 8→4 单页失败重试轮数（快失败，恢复权交给 server 180s 补抓）
+PAGE_FAIL_BACKOFF = 45     # 失败退避基础秒数（第 i 轮失败睡 45*i 秒）
+PAGE_FAIL_MAX_SLEEP = 90   # v105: 120→90 单轮退避上限
+MIN_FULL_STOCKS = 3000     # 全量结果低于此阈值视为限流截断，拒绝写入 data.json
+RUN_BUDGET_S = 900         # v105: 2200→900 全局时间预算（秒）：耗尽即止，进入完整性判定；须 < server 侧 960s 超时
+
+
+_START_TS = time.time()   # v105: 模块级起点，供 fetch_page_strict 页内预算检查
 
 def fetch_page(fs, pn, tries=6):
     params = {
@@ -90,6 +102,25 @@ def fetch_page(fs, pn, tries=6):
             return r.json()
         except Exception:
             time.sleep(1.5 * (i + 1))
+    return None
+
+
+def fetch_page_strict(fs, pn):
+    """带失败判定的分页抓取：返回 (diff列表或None)。
+    None = 重试耗尽仍失败（限流/断连）；[] = 服务端成功返回的空页。
+    失败退避 45s 起步线性加长、上限 120s——东财 IP 风控窗口为分钟级，短重试只会持续被断连。
+    """
+    for i in range(PAGE_FAIL_RETRIES):
+        d = fetch_page(fs, pn, tries=3)  # 每轮轮换全部 3 个域名，外层控制长退避
+        if d is not None:
+            data = (d or {}).get("data") or {}
+            return data.get("diff") or []
+        if time.time() - _START_TS > RUN_BUDGET_S:   # v105: 页内退避也受全局预算约束
+            print(f"    [页 {pn}] 全局预算耗尽，放弃重试", flush=True)
+            return None
+        wait = min(PAGE_FAIL_BACKOFF * (i + 1), PAGE_FAIL_MAX_SLEEP)
+        print(f"    [页 {pn}] 请求失败（疑似限流），退避 {wait}s 后重试（{i+1}/{PAGE_FAIL_RETRIES}）", flush=True)
+        time.sleep(wait)
     return None
 
 
@@ -560,22 +591,347 @@ def incremental():
     print(f"增量完成：更新 {updated}/{len(codes)} 只股票行情 → data.json")
 
 
+# ========== v102 新浪备源：全市场快照（东财 clist 被风控时接管） ==========
+SINA_HQ_BASE = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                "Market_Center.getHQNodeData?page={p}&num=100&node=hs_a&sort=symbol&asc=1")
+SINA_HEADERS = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.sina.com.cn"}
+TX_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{n},qfq"
+PCT_BACKFILL_PER_ROUND = 500   # 每轮备源最多补的腾讯日K只数（防触发腾讯频控）
+
+
+def _sina_get_page(page, tries=4):
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(SINA_HQ_BASE.format(p=page), headers=SINA_HEADERS)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = r.read().decode("gbk", "replace")
+            arr = json.loads(body)
+            if isinstance(arr, list):
+                return arr
+            if isinstance(arr, dict) and arr.get("page") is not None:
+                return arr.get("data") or []
+            return []
+        except Exception as e:
+            wait = 20 * (i + 1)
+            print(f"[新浪备源] 第 {page} 页失败（{str(e)[:50]}），退避 {wait}s 重试 {i+1}/{tries}", flush=True)
+            time.sleep(wait)
+    return None
+
+
+def _sina_fetch_all(quiet):
+    """新浪 hs_a 全市场分页。返回 [(code, dict)]，失败返回 None。
+    字段：symbol(sh600000)/code/name/trade(现价)/pricechange(涨跌额)/changepercent(涨跌幅%)/
+          volume/amount(万元)/mktcap(总市值万)/nmc(流通万)/turnoverratio/per/pb"""
+    all_rows = []
+    page = 1
+    empty = 0
+    while page <= 90:
+        arr = _sina_get_page(page)
+        if arr is None:
+            return None
+        if not arr:
+            empty += 1
+            if empty >= 2:
+                break
+            page += 1
+            time.sleep(0.35)
+            continue
+        empty = 0
+        all_rows.extend(arr)
+        if not quiet and page % 10 == 0:
+            print(f"[新浪备源] 已拉 {len(all_rows)} 只（第 {page} 页）", flush=True)
+        page += 1
+        time.sleep(0.35)
+    if len(all_rows) < MIN_FULL_STOCKS:
+        print(f"[新浪备源] 仅 {len(all_rows)} 只（< {MIN_FULL_STOCKS}），视为失败", flush=True)
+        return None
+    return all_rows
+
+
+def _is_delisting(name, price):
+    # 退市整理股过滤：名称带"退"，或便士股（<0.5 元）——实测未命中 code_map 的多为这类
+    if not name:
+        return False
+    if "退" in name:
+        return True
+    try:
+        return float(price) < 0.5
+    except (TypeError, ValueError):
+        return False
+
+
+def fetch_tx_pct_batch(codes):
+    """腾讯日K批量算 pct5/pct10/pct20/pct60/pctYTD → {code: {...}}。单只一请求，失败跳过。"""
+    out = {}
+    today = time.strftime("%Y-%m-%d")
+    year_start_days = None
+    for code in codes:
+        sym = ("sh" if code.startswith("6") else "sz") + code
+        try:
+            # 首次探测年初至今所需根数（约 240 覆盖全年）；固定取 250 根足够
+            url = TX_KLINE_URL.format(code=sym, n=250)
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                j = json.loads(r.read().decode("utf-8"))
+            data = (j.get("data") or {}).get(sym) or {}
+            days = data.get("qfqday") or data.get("day") or []
+            if len(days) < 6:
+                continue
+            closes = [float(x[2]) for x in days]
+            last = closes[-1]
+
+            def _pct(n):
+                return round((last / closes[-1 - n] - 1) * 100, 2) if len(closes) > n else None
+            ytd = None
+            for i, d in enumerate(days):
+                if d[0] >= today[:4] + "-01-01":
+                    base = closes[i - 1] if i > 0 else closes[0]
+                    ytd = round((last / base - 1) * 100, 2)
+                    break
+            out[code] = {"pct5": _pct(5), "pct10": _pct(10), "pct20": _pct(20),
+                         "pct60": _pct(60), "pctYTD": ytd}
+        except Exception:
+            continue
+        time.sleep(0.3)
+    return out
+
+
+def fetch_all_sina(quiet):
+    """新浪备源全量：分页行情 → 过滤 → 行业还原（code_map/indmap_sec）→ 两级 pct 补齐 → payload。
+    成功返回 payload（未落盘），失败返回 None。"""
+    t0 = time.time()
+    rows = _sina_fetch_all(quiet)
+    if rows is None:
+        return None
+
+    # 行业字典
+    indmap_cfg = {}
+    sec_dict = {}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "indmap.json"), encoding="utf-8") as f:
+            indmap_cfg = json.load(f) or {}
+    except Exception as e:
+        print("[新浪备源] indmap.json 加载失败: %s" % str(e)[:60], flush=True)
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "indmap_sec.json"), encoding="utf-8") as f:
+            sec_dict = (json.load(f) or {}).get("map") or {}
+    except Exception as e:
+        print("[新浪备源] indmap_sec.json 加载失败: %s" % str(e)[:60], flush=True)
+    l1_map = {str(k): v for k, v in (indmap_cfg.get("map") or {}).items()}
+    code_l1 = {str(k): v for k, v in (indmap_cfg.get("code_map") or {}).items()}
+
+    all_stocks = []
+    unclassified = 0
+    for x in rows:
+        sym = str(x.get("symbol") or "")
+        code = sym[2:] if len(sym) > 2 else str(x.get("code") or "")
+        name = str(x.get("name") or "")
+        try:
+            price = float(x.get("trade") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0 or _is_delisting(name, price):
+            continue
+
+        def _wan_to_yuan(v):
+            try:
+                return float(v) * 10000.0
+            except (TypeError, ValueError):
+                return None
+        info = sec_dict.get(code) or {}
+        l1 = info.get("l1") or code_l1.get(code) or "综合"
+        sec = info.get("sec")
+        if not code_l1.get(code) and not info.get("l1"):
+            unclassified += 1
+        all_stocks.append({
+            "code": code,
+            "name": name,
+            "price": price,
+            "pct": norm(x.get("changepercent")),
+            "chg": norm(x.get("pricechange")),
+            "amount": _wan_to_yuan(x.get("amount")),
+            "mcap": _wan_to_yuan(x.get("mktcap")),  # 新浪字段名为 mktcap（万元）→ 元
+            "peTTM": norm(x.get("per")),
+            "pct5": None, "pct10": None, "pct20": None, "pct60": None, "pctYTD": None,
+            # 二级缺失时用一级名作二级显示（跟随正确的一级分组，避免全堆进"其他"）
+            "industry": sec or l1,
+            "_l1": l1,
+        })
+    if not quiet:
+        print(f"[新浪备源] 行情 {len(all_stocks)} 只（剔除退市/异常 {len(rows)-len(all_stocks)}），"
+              f"行业未分类 {unclassified} 只归'综合'", flush=True)
+
+    # 两级 pct 补齐：优先告警相关+市值前 500
+    alert_codes = []
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "alerts.json"), encoding="utf-8") as f:
+            alerts = json.load(f) or {}
+        alert_codes = [c for c in alerts.keys() if re.match(r"^[0-9]{6}$", str(c))]
+    except Exception:
+        pass
+    by_mcap = sorted([s for s in all_stocks if s["mcap"]], key=lambda s: -s["mcap"])
+    priority = [c for c in alert_codes if any(s["code"] == c for s in all_stocks)]
+    priority += [s["code"] for s in by_mcap[:PCT_BACKFILL_PER_ROUND] if s["code"] not in priority]
+    priority = priority[:PCT_BACKFILL_PER_ROUND + len(alert_codes)]
+    if not quiet:
+        print(f"[新浪备源] 腾讯日K回补区间涨幅：{len(priority)} 只（告警+市值前500）", flush=True)
+    tx = fetch_tx_pct_batch(priority)
+    for s in all_stocks:
+        t = tx.get(s["code"])
+        if t:
+            s.update(t)
+    filled = sum(1 for s in all_stocks if s["pct5"] is not None)
+    if not quiet:
+        print(f"[新浪备源] pct 已回补 {filled} 只，其余留空显示'-'（后续快照滚动补齐）", flush=True)
+
+    # 分组（与东财主流程同构：二级行业 → 申万一级聚合）
+    industries = {}
+    for s in all_stocks:
+        industries.setdefault(s["industry"], []).append(s)
+    result = []
+    for name, stocks in industries.items():
+        total_mcap = sum(s["mcap"] for s in stocks if s["mcap"])
+        result.append({"name": name, "total_mcap": total_mcap, "pe": None, "stocks": stocks})
+    result.sort(key=lambda x: -x["total_mcap"])
+
+    sec_bucket = {}
+    for ind in result:
+        votes = {}
+        for s in ind["stocks"]:
+            l1 = s.get("_l1") or "综合"
+            votes[l1] = votes.get(l1, 0) + 1
+        l1 = max(votes.items(), key=lambda kv: kv[1])[0] if votes else "综合"
+        sec_bucket.setdefault(l1, []).append(ind)
+    sectors = []
+    for l1, children in sec_bucket.items():
+        tm = sum(c["total_mcap"] for c in children)
+
+        def wp(f, _st=[s for c in children for s in c["stocks"]]):
+            num = den = 0.0
+            for s in _st:
+                v = s.get(f)
+                mc = s.get("mcap")
+                if v is not None and mc:
+                    num += v * mc
+                    den += mc
+            return (num / den) if den else None
+        sectors.append({
+            "name": l1, "total_mcap": tm, "pe": None,
+            "pct": wp("pct"), "pct5": wp("pct5"), "pct10": wp("pct10"),
+            "pct20": wp("pct20"), "pct60": wp("pct60"), "pctYTD": wp("pctYTD"),
+            "children": [c["name"] for c in sorted(children, key=lambda x: -x["total_mcap"])],
+        })
+    sectors.sort(key=lambda x: -x["total_mcap"])
+
+    payload = {
+        "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "full",
+        "source": "sina_backup",
+        "total_stocks": len(all_stocks),
+        "total_industries": len(result),
+        "industries": result,
+        "sectors": sectors,
+    }
+    if not quiet:
+        print(f"[新浪备源] 完成：{len(all_stocks)} 只 / {len(result)} 行业 / 耗时 {time.time()-t0:.0f}s", flush=True)
+    return payload
+
+
 def main():
     quiet = "--quiet" in sys.argv
+    # v102 双源：东财主源连续失败 → 新浪备源全量接管（行业体系用 indmap/code_map/indmap_sec 还原）
+    em_fail = 0
+    for attempt in range(2):
+        payload = _em_fetch_all(quiet)
+        if payload is not None:
+            _write_payload(payload, quiet)
+            return
+        em_fail += 1
+        print("[双源] 东财主源第 %d/2 轮失败" % em_fail, flush=True)
+        time.sleep(5)
+    print("[双源] 东财主源连续 2 轮失败，切换新浪备源全量抓取…", flush=True)
+    payload = fetch_all_sina(quiet)
+    if payload is not None:
+        _write_payload(payload, quiet)
+        return
+    print("[双源] 备源亦失败，data.json 保持旧快照不变。", flush=True)
+    sys.exit(3)
+
+
+def _write_payload(payload, quiet):
+    """落盘 + 附带输出（global/futures 保留东财通道——它们未被风控）"""
+    out = data_path()
+    try:
+        with datalock.DataLock():
+            # 保留现货模块 q5500 节点（v33b：全量抓取不应抹掉现货数据）
+            try:
+                with open(out, encoding="utf-8") as f_old:
+                    old_payload = json.load(f_old)
+                if old_payload.get("q5500"):
+                    payload["q5500"] = old_payload["q5500"]
+                if old_payload.get("rare_earth"):
+                    payload["rare_earth"] = old_payload["rare_earth"]
+            except Exception:
+                pass
+            tmp = out + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, out)
+    except datalock.DataLockTimeoutError as e:
+        print(str(e))
+        sys.exit(1)
+    print(f"完成：{payload.get('total_stocks')} 只股票，{payload.get('total_industries')} 个行业"
+          f"（source={payload.get('source')}）→ data.json", flush=True)
+    fetch_global()
+    fetch_futures()
+
+
+def _em_fetch_all(quiet):
+    """东财主源（原 main 主体）。成功返回 payload dict（未落盘），失败返回 None。
+    失败定义：任一市场分页重试耗尽 / 全量结果触发残缺保护。"""
+    quiet = quiet
+    # v90.1 限流预检：开抓前先轻探 3 轮（每轮轮换 3 域名，间隔 15s）。
+    # 全失败 = IP 仍被限流，立即退出（退出码 3），不做注定失败的长退避——
+    # 2026-09-23 17:17 教训：限流期硬重试 40 分钟，跑满 server 2400s 超时被强杀。
+    probe_ok = False
+    for i in range(3):
+        d = fetch_page(MARKETS[0][1], 1, tries=3)
+        if d and d.get("data"):
+            probe_ok = True
+            break
+        print(f"[限流预检] 第 {i+1}/3 次预检失败，15s 后再试", flush=True)
+        time.sleep(15)
+    if not probe_ok:
+        print("[限流预检] 预检 3 轮全部失败：东财仍在限流本机，主源判失败。", flush=True)
+        return None  # v102：交由 main() 降级分支处理备源
+    _start_ts = time.time()
     all_stocks = []
     for label, fs in MARKETS:
-        d = fetch_page(fs, 1)
+        if time.time() - _start_ts > RUN_BUDGET_S:
+            print("[时间预算] 已耗尽，停止抓取后续市场，转入完整性判定", flush=True)
+            break
+        d = None
+        for i in range(5):  # 首页失败=该市场全军覆没，长退避硬重试
+            d = fetch_page(fs, 1, tries=2)
+            if d and d.get("data"):
+                break
+            wait = min(60 * (i + 1), 90)   # v105: 上限 180→90，首页最多 5×90s，不再吃掉大半预算
+            print(f"[{label}] 首页请求失败（疑似限流），退避 {wait}s 后重试（{i+1}/5）", flush=True)
+            time.sleep(wait)
         if not d or not d.get("data"):
-            print(f"[{label}] 获取失败，跳过")
+            print(f"[{label}] 首页重试耗尽仍失败，跳过该市场", flush=True)
             continue
         total = d["data"]["total"]
         # 服务端可能将每页条数截断，动态翻页直到取满或连续空页
         pn = 1
         got = 0
         empty = 0
-        while got < total and pn <= 200:
-            d = fetch_page(fs, pn)
-            diff = (d or {}).get("data", {}).get("diff") or []
+        while got < total and pn <= 400 and time.time() - _start_ts < RUN_BUDGET_S:
+            # v90：diff is None = 请求失败（限流），不算空页；空页必须来自成功请求
+            diff = fetch_page_strict(fs, pn)
+            if diff is None:
+                print(f"[{label}] 第 {pn} 页重试耗尽仍失败，该市场止步 {got}/{total}", flush=True)
+                return None  # v102：主源分页失败即整体失败，交给降级分支
             if not diff:
                 empty += 1
                 if empty >= 2:
@@ -607,7 +963,7 @@ def main():
             if not quiet:
                 print(f"[{label}] {pn} 页，累计 {got}/{total}")
             pn += 1
-            time.sleep(SLEEP)
+            time.sleep(SLEEP + random.uniform(0, 1.2))   # v105: 2.0~3.2s 抖动，打散请求特征
         if not quiet:
             print(f"[{label}] 完成，共 {got} 只")
         time.sleep(1.0)
@@ -694,34 +1050,27 @@ def main():
     payload = {
         "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "full",
+        "source": "eastmoney",
         "total_stocks": len(all_stocks),
         "total_industries": len(result),
         "industries": result,
         "sectors": sectors,
     }
-    out = data_path()
-    # 保留现货模块 q5500 节点（v33b：全量抓取不应抹掉现货数据），临界区加锁
+    # 残缺保护（2026-09-23）：静态阈值 + 动态对比双保险
+    # 全量结果明显偏少（<3000 或 比旧快照缩水>10%）= 限流截断，拒绝覆盖，保留旧快照
+    old_n = None
     try:
-        with datalock.DataLock():
-            try:
-                with open(out, encoding="utf-8") as f_old:
-                    old_payload = json.load(f_old)
-                if old_payload.get("q5500"):
-                    payload["q5500"] = old_payload["q5500"]
-                if old_payload.get("rare_earth"):
-                    payload["rare_earth"] = old_payload["rare_earth"]
-            except Exception:
-                pass
-            tmp = out + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
-            os.replace(tmp, out)  # 原子写
-    except datalock.DataLockTimeoutError as e:
-        print(str(e))
-        sys.exit(1)
-    print(f"完成：{len(all_stocks)} 只股票，{len(result)} 个行业 → data.json")
-    fetch_global()
-    fetch_futures()
+        with open(data_path(), encoding="utf-8") as f_old:
+            old_n = json.load(f_old).get("total_stocks")
+    except Exception:
+        pass
+    shrink = old_n is not None and len(all_stocks) < old_n * 0.9
+    if len(all_stocks) < MIN_FULL_STOCKS or shrink:
+        reason = (f"低于阈值 {MIN_FULL_STOCKS}" if len(all_stocks) < MIN_FULL_STOCKS
+                  else f"比旧快照 {old_n} 只缩水超 10%")
+        print(f"[残缺保护] 东财全量仅抓到 {len(all_stocks)} 只（{reason}），疑似限流截断。", flush=True)
+        return None  # v102：交由 main() 降级分支处理备源
+    return payload  # v102：落盘统一由 _write_payload 完成
 
 
 if __name__ == "__main__":
