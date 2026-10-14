@@ -4,7 +4,7 @@
 
 1. **缩放无上限** —— 滚轮可放大到任意级别（等效无限），小市值公司的方块放大后足够大，公司名一定能显示；
 2. **小方块标签自适应** —— 字号随方块大小自动缩放；悬停时无论方块多小都强制显示名称（放不下显示代码）。
-3. ![云图](D:\autoagent_file\a-share-heatmap\云图.PNG)
+3. https://github.com/justycg5/stock-map/blob/main/%E4%BA%91%E5%9B%BE.PNG?raw=true
 
 ## 功能
 
