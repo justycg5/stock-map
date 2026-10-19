@@ -946,10 +946,12 @@ def _alert_cond_text(rule):
     is_pct = rule.get("type") not in ("price", "chg")
     return "%s %s %s" % (t, op, _fmt_num(val, is_pct))
 
-def _alert_msg(name, code, cur, rule):
+def _alert_msg(name, code, cur, rule, price=None):
     is_pct = rule.get("type") != "price"
     lines = ["【股价告警】%s(%s)" % (name, code)]
     lines.append("当前值：%s" % _fmt_num(cur, is_pct))
+    if is_pct and price is not None:                       # v106.1：涨跌幅类告警补当时价格
+        lines.append("当前价：%s" % _fmt_num(price))
     lines.append("触发条件：%s" % _alert_cond_text(rule))
     note = (rule.get("note") or "").strip()
     if note:
@@ -957,10 +959,12 @@ def _alert_msg(name, code, cur, rule):
     lines.append("时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S"))
     return "\n".join(lines)
 
-def _alert_reset_msg(name, code, cur, rule):
+def _alert_reset_msg(name, code, cur, rule, price=None):
     """fired 状态回落（价格离开触发范围）时的恢复通知。"""
     lines = ["【股价告警 · 监控状态恢复】%s(%s)" % (name, code)]
     lines.append("当前值：%s" % _fmt_num(cur, rule.get("type") != "price"))
+    if rule.get("type") != "price" and price is not None:  # v106.1：恢复通知同样带当时价格
+        lines.append("当前价：%s" % _fmt_num(price))
     lines.append("此前触发条件：%s" % _alert_cond_text(rule))
     lines.append("说明：价格已回到触发范围之外，恢复正常监控")
     lines.append("时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -1097,7 +1101,7 @@ def _check_alerts():
                     rule["resetAt"] = now
                     # v84.1：状态恢复通知（价格回到触发范围之外）
                     send_fn, ch = _alert_channel(rule, code)
-                    ok_r, err_r = send_fn(_alert_reset_msg(name, str(code), cur, rule))
+                    ok_r, err_r = send_fn(_alert_reset_msg(name, str(code), cur, rule, x.get("f2")))
                     if not ok_r:
                         print("[股价告警] 恢复通知推送失败(%s) %s: %s" % (ch, code, err_r), flush=True)
                     changed = True
@@ -1108,7 +1112,7 @@ def _check_alerts():
                     last_reset = 0
                 if hit and (now - last_reset) >= cooldown:
                     send_fn, ch = _alert_channel(rule, code)
-                    ok, msg = send_fn(_alert_msg(name, str(code), cur, rule))
+                    ok, msg = send_fn(_alert_msg(name, str(code), cur, rule, x.get("f2")))
                     if not ok:
                         print("[股价告警] 触发推送失败(%s) %s: %s" % (ch, code, msg), flush=True)
                     rule["state"] = "fired"
@@ -1268,11 +1272,34 @@ def _cal_push_notify(new_ids, upgraded, new_items, old_map):
         if in_quiet:
             print("[日历推送] 免打扰(%s-%s)跳过 %d 条" % (qs, qe, len(lines)), flush=True)
             return
-    text = "【财经日历 · 重要事件更新】" + chr(10) + chr(10).join(lines[:10])
-    if len(lines) > 10:
-        text += chr(10) + "…等 %d 条" % len(lines)
-    ok, err = _send_webhook_url(url, text)
-    print("[日历推送] %s（%d 条）" % ("成功" if ok else "失败:" + str(err)[:60], min(len(lines), 10)), flush=True)
+    # v106：分片发送（企微文本上限 2048 字节，每片留余量按 ≤1900 字节装填），超限不再截断
+    MAX_BYTES = 1900
+    chunks = []
+    cur_lines, cur_bytes = [], len("【财经日历 · 重要事件更新】".encode("utf-8")) + 1
+    for ln in lines:
+        b = len(ln.encode("utf-8")) + 1   # +1 换行
+        if cur_lines and cur_bytes + b > MAX_BYTES:
+            chunks.append(cur_lines)
+            cur_lines, cur_bytes = [], 0
+        cur_lines.append(ln)
+        cur_bytes += b
+    if cur_lines:
+        chunks.append(cur_lines)
+    if len(chunks) == 1:
+        text = "【财经日历 · 重要事件更新】" + chr(10) + chr(10).join(chunks[0])
+        ok, err = _send_webhook_url(url, text)
+        print("[日历推送] %s（%d 条）" % ("成功" if ok else "失败:" + str(err)[:60], len(lines)), flush=True)
+    else:
+        total, all_ok, last_err = len(lines), True, None
+        for idx, cl in enumerate(chunks, 1):
+            head = "【财经日历 · 重要事件更新】(%d/%d)" % (idx, len(chunks)) if len(chunks) > 1 else "【财经日历 · 重要事件更新】"
+            text = head + chr(10) + chr(10).join(cl)
+            ok, err = _send_webhook_url(url, text)
+            all_ok = all_ok and ok
+            if not ok:
+                last_err = err
+            time.sleep(1.0)   # 片间隔，防企微频控
+        print("[日历推送] %s（%d 条 / %d 片）" % ("成功" if all_ok else "部分失败:" + str(last_err)[:60], total, len(chunks)), flush=True)
 
 def _send_webhook_url(url, text, retries=2):
     """指定 URL 的 webhook 发送（日历独立配置用）。"""
