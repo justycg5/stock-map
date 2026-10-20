@@ -187,6 +187,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"ok": False, "msg": str(e)[:80], "quotes": {}})
         return self._json({"ok": True, "fresh": fresh, "ts": int(_FUT_QUOTE_MEM["ts"]), "quotes": data})
 
+    def _handle_idx_quotes(self):
+        """v107 指数条代理：{ok, quotes:[...]}（东财字段名兼容，diff 数组形态）"""
+        try:
+            data = _tx_idx_quotes()
+        except Exception as e:
+            data = None
+        if not data:
+            return self._json({"ok": False, "msg": "idx unavailable", "data": {"diff": []}})
+        diff = [data[k] for k in ("000001", "399006", "000688", "000300", "399001") if k in data]
+        return self._json({"ok": True, "data": {"diff": diff}, "ts": int(time.time())})
+
     def _handle_version(self):
         """data.json 版本探测（文件 mtime，秒级）。
         自动刷新轮询先比对这个值，快照没变（午休/收盘/周末）就不拉整包，移动端闲置流量≈0。"""
@@ -281,6 +292,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._handle_rare_earth_refetch()
         if path == "/api/fut_quotes":
             return self._handle_fut_quotes()
+        if path == "/api/idx_quotes":
+            return self._handle_idx_quotes()
         if path == "/api/f10":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             code = (qs.get("code") or [""])[0]
@@ -2046,13 +2059,22 @@ def _f10_fetch(secucode):
         "deductNpYoy": _n(r0.get("KCFJCXSYJLRTZ")),
         "opCash": _n(r0.get("NETCASH_OPERATE_PK")),
         "speedRatio": _n(r0.get("GUARD_SPEED_RATIO")),
+        # v106.3：备源快照无营收/净利 → F10 补位（同一请求多取 4 字段，零额外请求）
+        "rev": _n(r0.get("TOTALOPERATEREVE")),
+        "revYoy": _n(r0.get("TOTALOPERATEREVETZ")),
+        "np": _n(r0.get("PARENTNETPROFIT")),
+        "npYoy": _n(r0.get("PARENTNETPROFITTZ")),
     }
 
 def _f10_get(code):
     """code 6 位 → 查缓存（内存/磁盘），过期则拉 F10。失败返回 None。"""
     if not re.match(r"^\d{6}$", code or ""):
         return None
-    secucode = code + ("." + ("SH" if code.startswith(("6", "9")) else "SZ"))
+    # v106.2：北交所修正——92 开头为北交所（.BJ），此前误判 .SZ 导致 351 只 BJ 股 F10 永远「—」
+    if code.startswith("92"):
+        secucode = code + ".BJ"
+    else:
+        secucode = code + ("." + ("SH" if code.startswith(("6", "9")) else "SZ"))
     now = time.time()
     ent = _F10_MEMORY.get(code)
     if ent and now - ent["ts"] < F10_TTL_S:
@@ -2190,6 +2212,49 @@ _FUT_SINA_MAP = {
     "LCPT": ("hf_CAD", "hf", "伦敦铜"),
 }
 _FUT_QUOTE_MEM = {"ts": 0.0, "data": {}}
+
+# ========== v107 指数条本地代理（腾讯源）：页面 JSONP 直连东财被封时静默空白 ==========
+# 腾讯指数字段（gbk, ~ 分隔）：1名称 3现价 4昨收 31涨跌额 32涨跌幅% 37成交额(万元)
+_IDX_TX_CODES = "sh000001,sz399006,sh000688,sh000300,sz399001"   # 前4渲染 + 深证成指(仅两市成交额)
+_IDX_MEM = {"ts": 0.0, "data": None}
+_IDX_LOCK = threading.Lock()
+
+def _tx_idx_quotes():
+    """腾讯指数批量 → {f12: {f2现价, f3涨跌幅, f12代码, f14名称, f6成交额(元)}}（对齐东财字段名，前端零适配）。
+    4s 内存缓存，多页签共享。失败返回 None（前端保留旧值）。"""
+    now = time.time()
+    if _IDX_MEM["data"] is not None and now - _IDX_MEM["ts"] < 4:
+        return _IDX_MEM["data"]
+    with _IDX_LOCK:
+        now = time.time()
+        if _IDX_MEM["data"] is not None and now - _IDX_MEM["ts"] < 4:
+            return _IDX_MEM["data"]
+        rows = None
+        try:
+            body = _http_get_raw("https://qt.gtimg.cn/q=" + _IDX_TX_CODES,
+                                 {"User-Agent": "Mozilla/5.0"}, timeout=8).decode("gbk", "replace")
+            rows = {}
+            for m in re.finditer(r'v_(?:sh|sz|bj)(\d{6})="([^"]*)"', body):
+                f = m.group(2).split("~")
+                if len(f) <= 37 or not f[1]:
+                    continue
+                try:
+                    rows[m.group(1)] = {
+                        "f12": m.group(1), "f14": f[1],
+                        "f2": float(f[3]) if f[3] else None,
+                        "f3": float(f[32]) if f[32] else None,
+                        "f6": (float(f[37]) * 10000.0) if f[37] else None,   # 万元→元
+                    }
+                except ValueError:
+                    continue
+        except Exception as e:
+            print("[指数代理] 腾讯失败: %s" % e, flush=True)
+        if rows and len(rows) >= 4:
+            _IDX_MEM["data"] = rows
+            _IDX_MEM["ts"] = now
+            return rows
+        return _IDX_MEM["data"]   # 失败回退最近一次成功值（最长 10 分钟内）
+
 _FUT_QUOTE_TTL_S = 4       # 内存缓存：多页签共享，新浪侧实际 1 请求/8s
 _FUT_QUOTE_STALE_S = 600   # 新浪失败时最长回退 10 分钟内最近成功值
 _SINA_FUT_LOCK = threading.Lock()

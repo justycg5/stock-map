@@ -1351,6 +1351,19 @@ function fetchF10ForTip(code) {
     if (el2) { el2.textContent = dny; el2.style.color = dnyColor; }
     if (el3) el3.textContent = oc;
     if (el4) el4.textContent = sr;
+    // v106.3：快照缺营收/净利（新浪备源期）→ 用 F10 数据补位；快照有值则不覆盖（保持快照口径）
+    const revEl = document.querySelector('.tt-f10rev[data-code="' + code + '"]');
+    const revYoyEl = document.querySelector('.tt-f10revyoy[data-code="' + code + '"]');
+    const npEl = document.querySelector('.tt-f10np[data-code="' + code + '"]');
+    const npYoyEl = document.querySelector('.tt-f10npyoy[data-code="' + code + '"]');
+    if (revEl && revEl.textContent === "—") {
+      if (d && d.rev != null) revEl.textContent = fmtYi(d.rev);
+      if (revYoyEl && d && d.revYoy != null) { revYoyEl.textContent = (d.revYoy > 0 ? "+" : "") + d.revYoy.toFixed(2) + "%"; revYoyEl.style.color = pctTextColor(d.revYoy); }
+    }
+    if (npEl && npEl.textContent === "—") {
+      if (d && d.np != null) npEl.textContent = fmtYi(d.np);
+      if (npYoyEl && d && d.npYoy != null) { npYoyEl.textContent = (d.npYoy > 0 ? "+" : "") + d.npYoy.toFixed(2) + "%"; npYoyEl.style.color = pctTextColor(d.npYoy); }
+    }
   };
   if (_f10Cache[code]) { render(_f10Cache[code]); return; }
   if (!_f10Pending[code]) {
@@ -1386,12 +1399,12 @@ function updateTooltip(node, mx, my, centered) {
     const fs1 = node.peTTM;
     html += '<div class="tt-row tt-f10row0" data-code="' + node.code + '"><span class="tt-label">报告期</span><span class="tt-f10v0">…</span></div>';
     html += '<div class="tt-row"><span class="tt-label">市盈率TTM</span><span>' + (fs1 === null || fs1 === undefined || isNaN(fs1) ? "—" : fs1.toFixed(2)) + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">总营收</span><span>' + fmtYi2(node.rev) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">总营收</span><span class="tt-f10rev" data-code="' + node.code + '">' + fmtYi2(node.rev) + "</span></div>";
     const ry = node.revYoy;
-    html += '<div class="tt-row"><span class="tt-label">总营收同比</span><span style="color:' + pctTextColor(ry) + '">' + (ry === null || ry === undefined || isNaN(ry) ? "—" : ((ry > 0 ? "+" : "") + ry.toFixed(2) + "%")) + "</span></div>";
-    html += '<div class="tt-row"><span class="tt-label">归母净利润</span><span>' + fmtYi2(node.np) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">总营收同比</span><span class="tt-f10revyoy" data-code="' + node.code + '" style="color:' + pctTextColor(ry) + '">' + (ry === null || ry === undefined || isNaN(ry) ? "—" : ((ry > 0 ? "+" : "") + ry.toFixed(2) + "%")) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">归母净利润</span><span class="tt-f10np" data-code="' + node.code + '">' + fmtYi2(node.np) + "</span></div>";
     const ny = node.npYoy;
-    html += '<div class="tt-row"><span class="tt-label">归母净利润同比</span><span style="color:' + pctTextColor(ny) + '">' + (ny === null || ny === undefined || isNaN(ny) ? "—" : ((ny > 0 ? "+" : "") + ny.toFixed(2) + "%")) + "</span></div>";
+    html += '<div class="tt-row"><span class="tt-label">归母净利润同比</span><span class="tt-f10npyoy" data-code="' + node.code + '" style="color:' + pctTextColor(ny) + '">' + (ny === null || ny === undefined || isNaN(ny) ? "—" : ((ny > 0 ? "+" : "") + ny.toFixed(2) + "%")) + "</span></div>";
     html += '<div class="tt-row tt-f10row" data-code="' + node.code + '"><span class="tt-label">扣非净利润</span><span class="tt-f10v">…</span></div>';
     html += '<div class="tt-row tt-f10row2" data-code="' + node.code + '"><span class="tt-label">扣非同比</span><span class="tt-f10v2">…</span></div>';
     html += '<div class="tt-row tt-f10row3" data-code="' + node.code + '"><span class="tt-label">经营现金流</span><span class="tt-f10v3">…</span></div>';
@@ -1732,18 +1745,11 @@ async function fetchOnce(showStatus) {
 const INDEX_SECIDS = "1.000001,0.399006,1.000688,1.000300,0.399001"; // 末位深证成指：仅用于计算两市成交额（f6），不渲染
 
 function fetchIndices() {
-  const cbName = "idxCb" + Date.now() + Math.floor(Math.random() * 1000);
-  const url = "https://push2delay.eastmoney.com/api/qt/ulist.np/get?secids=" + INDEX_SECIDS +
-    "&fields=f2,f3,f4,f5,f6,f12,f14&fltt=2&invt=2&np=1&cb=" + cbName;
-  const s = document.createElement("script");
-  s.src = url;
-  window[cbName] = function (json) {
-    renderIndices(json);
-    delete window[cbName];
-    s.remove();
-  };
-  s.onerror = function () { delete window[cbName]; s.remove(); };
-  document.head.appendChild(s);
+  // v107：切本地代理 /api/idx_quotes（腾讯源）。东财 JSONP 直连在风控期静默空白，无兜底
+  fetch("/api/idx_quotes?t=" + Date.now(), { cache: "no-store" })
+    .then(r => r.json())
+    .then(j => { if (j && j.ok && j.data) renderIndices(j); })
+    .catch(() => {});   // 失败保留旧值，下一轮 8s 重试
 }
 
 // ---------- 实时行情（8 秒刷新，直连东财 push2delay，与 52etf 同源） ----------
